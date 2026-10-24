@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mars-router"
+version = "0.1.0"
+description = "MARS: Memory-Augmented Router for atomic Skills in vision-language-action control"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = ["torch>=2.1", "numpy>=1.24", "pyyaml>=6.0"]
+
+[project.optional-dependencies]
+siglip2 = ["open_clip_torch>=2.32", "huggingface_hub"]
+test = ["pytest>=7"]
+
+[project.urls]
+Repository = "https://github.com/SkylineZ123/MARS"
+
+[tool.setuptools.packages.find]
+include = ["mars*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

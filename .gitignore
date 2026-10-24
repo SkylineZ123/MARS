@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# trained routers, text caches and experiment outputs
+*.pt
+*.pth
+*.h5
+outputs/

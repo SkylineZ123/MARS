@@ -1,0 +1,110 @@
+"""Build, save and load routers by kind."""
+
+from __future__ import annotations
+
+import torch
+from torch import nn
+
+MARS_KINDS = ("mars", "mars_gru")
+RECURRENT_KINDS = ("mamba_head", "mamba_query", "gru_query")  # RecurrentRouter without modality fusion
+WINDOWED_KINDS = ("windowed_tf", "windowed_xattn", "windowed_query")
+LEARNED_KINDS = (*MARS_KINDS, *RECURRENT_KINDS, "gru", *WINDOWED_KINDS)
+# Checkpoints written by the original research code under earlier kind names.
+LEGACY_KINDS = {"fusion_mamba": "mars", "fusion_gru": "mars_gru"}
+
+
+def build_router(kind: str, z_dim: int, num_classes: int, cfg, text_dim: int = 0) -> nn.Module:
+    """cfg: MARSConfig. z_dim is the packed input size (sum of modality_dims for MARS)."""
+    q_dim = int(cfg.q_dim) if cfg.use_q else 0
+    text = cfg.query_mode in ("text", "text_id")
+    if kind in MARS_KINDS:
+        from .router import MARSRouter
+
+        return MARSRouter(z_dim, num_classes, cfg.modality_dims, q_dim=q_dim, d_model=cfg.d_model,
+                          layers=cfg.ssm_layers, d_state=cfg.d_state, window=cfg.window, heads=cfg.heads,
+                          dropout=cfg.dropout, trunk="mamba" if kind == "mars" else "gru", fusion=cfg.fusion,
+                          skill_query=cfg.skill_query, query_mode=cfg.query_mode,
+                          text_dim=text_dim if cfg.skill_query and text else 0)
+    if kind in RECURRENT_KINDS:
+        from .router import RecurrentRouter
+
+        sq = kind != "mamba_head"
+        return RecurrentRouter(z_dim, num_classes, trunk="gru" if kind == "gru_query" else "mamba", skill_query=sq,
+                               q_dim=q_dim, d_model=cfg.d_model, layers=cfg.ssm_layers, d_state=cfg.d_state,
+                               window=cfg.window, stride=cfg.window_stride, heads=cfg.heads,
+                               query_layers=cfg.query_layers, ff_mult=cfg.ff_mult, dropout=cfg.dropout,
+                               query_mode=cfg.query_mode, text_dim=text_dim if sq and text else 0)
+    if kind == "gru":
+        from .baselines import GRURouter
+
+        return GRURouter(z_dim, num_classes, cfg.proj_dim, cfg.hidden, cfg.dropout, q_dim=q_dim)
+    if kind in WINDOWED_KINDS:
+        from .baselines import WindowedQueryRouter
+
+        sq = kind != "windowed_tf"
+        return WindowedQueryRouter(z_dim, num_classes, window=cfg.window, stride=cfg.window_stride, q_dim=q_dim,
+                                   d_model=cfg.d_model, heads=cfg.heads, temporal_layers=cfg.temporal_layers,
+                                   query_layers=cfg.query_layers, ff_mult=cfg.ff_mult, dropout=cfg.dropout,
+                                   temporal=kind != "windowed_xattn", skill_query=sq, query_mode=cfg.query_mode,
+                                   text_dim=text_dim if sq and text else 0)
+    raise ValueError(f"no learned router of type {kind!r}")
+
+
+def needs_text(kind: str, cfg) -> bool:
+    """True when the router reads frozen candidate text embeddings (set them before training)."""
+    text = cfg.query_mode in ("text", "text_id")
+    if kind in MARS_KINDS:
+        return cfg.skill_query and text
+    return kind in ("mamba_query", "gru_query", "windowed_xattn", "windowed_query") and text
+
+
+def count_params(model: nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def save_router(path, model: nn.Module, classes: list[str], extra: dict | None = None) -> None:
+    """`classes` is the controller order of the outputs; deployment maps outputs to policies with it."""
+    payload = {
+        "kind": model.kind,
+        "z_dim": model.z_dim,
+        "classes": list(classes),
+        "state_dict": model.state_dict(),
+        "ctor": dict(model.ctor),
+        "hparams": {k: getattr(model, k) for k in ("window", "stride") if hasattr(model, k)},
+        **(extra or {}),
+    }
+    torch.save(payload, path)
+
+
+def _from_ctor(kind: str, ctor: dict) -> nn.Module:
+    if kind in MARS_KINDS:
+        from .router import MARSRouter
+
+        return MARSRouter(**ctor)
+    if kind in RECURRENT_KINDS:
+        from .router import RecurrentRouter
+
+        return RecurrentRouter(**ctor)
+    if kind == "gru":
+        from .baselines import GRURouter
+
+        return GRURouter(**ctor)
+    if kind in WINDOWED_KINDS:
+        from .baselines import WindowedQueryRouter
+
+        return WindowedQueryRouter(**ctor)
+    raise ValueError(f"no learned router of type {kind!r}")
+
+
+def load_router(path, device="cpu") -> tuple[nn.Module, list[str]]:
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    kind, ctor = payload["kind"], dict(payload["ctor"])
+    if kind in LEGACY_KINDS:
+        kind = LEGACY_KINDS[kind]
+        # the earliest fusion checkpoints predate text queries and used learned ID queries
+        ctor.setdefault("query_mode", "id")
+        ctor.setdefault("text_dim", 0)
+    model = _from_ctor(kind, ctor)
+    model.load_state_dict(payload["state_dict"])
+    model.needs_modalities = payload.get("needs_modalities", getattr(model, "needs_modalities", False))
+    return model.to(device).eval(), payload["classes"]
