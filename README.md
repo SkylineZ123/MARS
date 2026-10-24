@@ -9,9 +9,10 @@ of the episode, and scores every candidate controller through a query built from
 controller's plain-language capability description. A k-of-k confirmation rule turns the scores
 into reliable handoffs.
 
-This repository contains the router, the candidate-text encoding, the skill switcher, training
-and offline metrics. The VLA backbone, the RL-token encoder and the specialists are not included.
-MARS only needs per-step feature vectors from them (see [Inputs](#inputs)).
+This repository contains the router, candidate-text encoding, skill switcher, shared RL Token
+adapter, TD3 chunk specialists, replay, training and routed execution. Supply a frozen VLA and
+environment through the feature and normalized-action interfaces. The RL modules are adapted
+from RL-Token-Pi05-open's `routerlt` implementation; see the [integration guide](docs/rltoken.zh-CN.md).
 
 ## Method
 
@@ -114,6 +115,33 @@ reports per-interval IoU, false entries, missed intervals and entry/exit lag. Wi
 `switch_grid=[(tau, k), ...]` and the per-step probabilities, it computes the same metrics for
 the *deployed* owner after the switcher is replayed.
 
+## RL Token and specialist learning
+
+```bash
+python -m examples.train_rltoken_synthetic  # CPU smoke run of the complete module chain
+python -m mars.rltoken --help
+
+python -m mars.rltoken train-adapter --data tokens.npz \
+  --config configs/rltoken.yaml --output outputs/adapter --device cuda
+python -m mars.rltoken train-specialist --data pickup_windows.npz \
+  --config configs/rltoken.yaml --output outputs/pickup.pt --updates 5000 --device cuda
+```
+
+`mars.rltoken` provides `RLTAdapter`, `SpecialistLearner`, `ReplayBuffer`, `EpisodeLog`,
+`build_windows`, checkpoint loaders, and `RoutedRLTPolicy`. Cached adapter data contains
+`tokens (N, slots, d_vla)`, `mask (N, slots)`, `token_groups`, and `group_sizes` as NPZ arrays.
+Specialist windows contain `z`, `q`, `ref`, `act`, `rew`, `valid`, `done`, `next_z`, `next_q`,
+and `next_ref`; use `build-windows` to construct them from an episode. Resume training with
+`--resume outputs/pickup.pt` and its paired `.replay.npz` file; `--updates` counts additional updates.
+
+During deployment, `RoutedRLTPolicy` shares one frozen adapter across the router and all
+specialists, calls a user-supplied VLA reference callback, and clears queued actions immediately
+when MARS switches controllers. Actions and proprioception use the same normalization as training;
+unnormalize actions in the environment adapter. See the [data and deployment guide](docs/rltoken.zh-CN.md).
+Existing `routerlt` adapter and chunk specialist checkpoints are supported (supply the matching
+config for older specialist checkpoints); the original pi05 causal-decoder and DSRL checkpoints
+use different formats. VLA/robot drivers and simulator environments are supplied separately.
+
 ## Inputs
 
 | Input | Shape | Source |
@@ -156,7 +184,9 @@ mars/
   metrics.py     selector_report and interval metrics
   registry.py    build_router, save_router, load_router
   config.py      MARSConfig
+  rltoken/       Shared adapter, TD3 specialists, replay windows, routed execution and CLI
 configs/mars.yaml
+configs/rltoken.yaml
 examples/train_synthetic.py
 tests/
 ```

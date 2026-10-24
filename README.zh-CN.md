@@ -4,7 +4,7 @@
 
 MARS 在每个控制步决定**由哪个控制器执行**：冻结的通用视觉-语言-动作（VLA）策略，或若干原子技能专家之一（例如 *Pickup*、*Place*）。它读取当前的多模态观测，维护整个 episode 的稠密因果记忆，并用每个候选控制器的自然语言能力描述构造查询，为候选逐一打分。打分再经过连续确认规则，得到稳定的交接。
 
-本仓库包含路由器、候选文本编码、技能切换器、训练与离线指标，不包含 VLA 主干、RL Token 编码器和专家策略。MARS 只需要它们提供的逐步特征向量（见[输入](#输入)）。
+本仓库包含路由器、候选文本编码、技能切换器、共享 RL Token 编码器与训练、TD3 技能专家、经验回放和路由执行。冻结 VLA 与环境通过特征和动作接口接入。完整 RL 使用说明见 [RL Token 集成指南](docs/rltoken.zh-CN.md)。
 
 ## 方法
 
@@ -89,6 +89,15 @@ for t in range(max_steps):
 
 `mars.metrics.selector_report` 报告逐步准确率、macro-F1、专家 F1，以及区间 IoU、误进入、漏检区间和进入/退出延迟。传入 `switch_grid=[(tau, k), ...]` 和逐步概率时，会回放切换器，对**实际部署的控制者**计算同样的指标。
 
+## RL Token 与专家训练
+
+```bash
+python -m examples.train_rltoken_synthetic  # CPU 完整调用链冒烟测试
+python -m mars.rltoken --help              # adapter 训练、窗口构造、专家训练/恢复
+```
+
+配置为 `configs/rltoken.yaml`；Python API 位于 `mars.rltoken`。详见 [训练数据、在线更新与部署](docs/rltoken.zh-CN.md)。
+
 ## 输入
 
 | 输入 | 形状 | 来源 |
@@ -126,7 +135,9 @@ mars/
   metrics.py     selector_report 与区间指标
   registry.py    build_router、save_router、load_router
   config.py      MARSConfig
+  rltoken/       共享表示、参考动作专家、TD3、回放、路由执行与 CLI
 configs/mars.yaml
+configs/rltoken.yaml
 examples/train_synthetic.py
 tests/
 ```

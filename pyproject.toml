@@ -4,12 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mars-router"
-version = "0.2.0"
-description = "MARS: Memory-Augmented Router for atomic Skills in vision-language-action control"
+version = "0.3.0"
+description = "MARS routing with shared RL Token representations and reinforcement-learning specialists"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = ["torch>=2.1", "numpy>=1.24", "pyyaml>=6.0"]
+
+[project.scripts]
+mars-rltoken = "mars.rltoken.cli:main"
 
 [project.optional-dependencies]
 siglip2 = ["open_clip_torch>=2.32", "huggingface_hub"]

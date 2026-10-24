@@ -1,0 +1,39 @@
+# Match d_model and d_in to the shared token / frozen VLA used by configs/mars.yaml.
+# d_in and n_slots are inferred from the cached NPZ when omitted.
+adapter:
+  d_model: 960
+  enc_layers: 4
+  dec_layers: 4
+  heads: 12
+  ff_mult: 4
+  dropout: 0.1
+adapter_train:
+  epochs: 1
+  batch_size: 16
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  warmup_steps: 200
+  stats_frames: 2048
+specialist:
+  C: 10
+  actor_hidden: [256, 256]
+  critic_hidden: [256, 256]
+  sigma: 0.1
+  ref_dropout: 0.5
+  gamma: 0.99
+  tau: 0.005
+  policy_delay: 2
+  target_sigma: 0.1
+  target_clip: 0.3
+  batch_size: 256
+  lr_actor: 3.0e-4
+  lr_critic: 3.0e-4
+  critic_grad_clip: 10.0
+  td_clamp_low: -0.5
+  td_clamp_high: 1.5
+  alpha_start: 20000
+  alpha_span: 50000
+  ref_alignment: executed
+  pad_mode: ref
+  buffer_capacity: 300000
+  reward: skill
