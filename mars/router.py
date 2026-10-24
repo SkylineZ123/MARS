@@ -14,10 +14,12 @@ atomic-skill specialists):
                        cross-attention over the memory; a shared score MLP gives one logit per
                        candidate, and softmax gives the probabilities handed to the switcher.
 
+The queries depend only on the candidate texts: there is no learned per-controller ID embedding,
+so the candidate list fixes the output order and permuting it permutes the outputs.
+
 `RecurrentRouter` is the trunk + head without modality fusion (single packed input vector);
 `MARSRouter` adds the fusion stage. With `skill_query=False` the query head is replaced by a
-direct linear classifier; `query_mode` selects text-only queries ("text", the MARS default),
-learned ID queries ("id") or both ("text_id").
+direct linear classifier (ablation).
 """
 
 from __future__ import annotations
@@ -29,7 +31,26 @@ from torch import Tensor, nn
 
 from .layers import MambaBlock, QueryBlock, window_indices, window_pad
 
-QUERY_MODES = ("text", "text_id", "id")
+
+def check_text_queries(skill_query: bool, text_dim: int) -> None:
+    if skill_query and text_dim <= 0:
+        raise ValueError("candidate text queries require text_dim > 0 (the text encoder width)")
+
+
+def init_text_queries(module: nn.Module, num_classes: int, text_dim: int, d: int) -> None:
+    """Frozen candidate text embeddings (buffer) and the shared trainable query projection."""
+    module.register_buffer("text_emb", torch.zeros(num_classes, text_dim))
+    module.text_proj = nn.Sequential(nn.LayerNorm(text_dim), nn.Linear(text_dim, d))
+
+
+def store_text_embeddings(module: nn.Module, emb: Tensor) -> None:
+    if not module.skill_query:
+        return
+    if tuple(emb.shape) != tuple(module.text_emb.shape) or not torch.isfinite(emb).all():
+        raise ValueError(f"expected finite text embeddings of shape {tuple(module.text_emb.shape)}, "
+                         f"got {tuple(emb.shape)}")
+    with torch.no_grad():
+        module.text_emb.copy_(emb.detach().to(module.text_emb))
 
 
 def pack_modalities(features, z: Tensor) -> Tensor:
@@ -55,20 +76,16 @@ class RecurrentRouter(nn.Module):
     def __init__(self, z_dim: int, num_classes: int, trunk: str = "mamba", skill_query: bool = False,
                  q_dim: int = 8, d_model: int = 128, layers: int = 2, d_state: int = 16, window: int = 8,
                  stride: int = 1, heads: int = 4, query_layers: int = 1, ff_mult: int = 4, dropout: float = 0.1,
-                 query_mode: str = "text_id", text_dim: int = 0):
+                 text_dim: int = 0):
         super().__init__()
         if trunk not in ("mamba", "gru"):
             raise ValueError(f"unknown trunk {trunk!r}")
-        if query_mode not in QUERY_MODES:
-            raise ValueError(f"unknown query_mode {query_mode!r}")
-        if skill_query and query_mode in ("text", "text_id") and text_dim <= 0:
-            raise ValueError("text queries require text_dim > 0")
+        check_text_queries(skill_query, text_dim)
         self.ctor = dict(z_dim=z_dim, num_classes=num_classes, trunk=trunk, skill_query=skill_query, q_dim=q_dim,
                          d_model=d_model, layers=layers, d_state=d_state, window=window, stride=stride, heads=heads,
-                         query_layers=query_layers, ff_mult=ff_mult, dropout=dropout, query_mode=query_mode,
-                         text_dim=text_dim)
+                         query_layers=query_layers, ff_mult=ff_mult, dropout=dropout, text_dim=text_dim)
         self.z_dim, self.q_dim, self.num_classes = z_dim, q_dim, num_classes
-        self.trunk, self.skill_query, self.query_mode = trunk, skill_query, query_mode
+        self.trunk, self.skill_query = trunk, skill_query
         self.window, self.stride = window, stride
         self.kind = {("mamba", False): "mamba_head", ("mamba", True): "mamba_query", ("gru", True): "gru_query",
                      ("gru", False): "gru_trunk"}[(trunk, skill_query)]
@@ -83,12 +100,7 @@ class RecurrentRouter(nn.Module):
         self.out_norm = nn.LayerNorm(d)
         if skill_query:
             self.age_emb = nn.Parameter(torch.randn(window, d) * 0.02)
-            if query_mode != "text":
-                self.id_emb = nn.Parameter(torch.zeros(num_classes, d) if query_mode == "text_id"
-                                           else torch.randn(num_classes, d) * 0.02)
-            if query_mode in ("text", "text_id"):
-                self.register_buffer("text_emb", torch.zeros(num_classes, text_dim))
-                self.text_proj = nn.Sequential(nn.LayerNorm(text_dim), nn.Linear(text_dim, d))
+            init_text_queries(self, num_classes, text_dim, d)
             self.query_blocks = nn.ModuleList([QueryBlock(d, heads, ff_mult, dropout) for _ in range(query_layers)])
             self.score = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d), nn.GELU(), nn.Linear(d, 1))
         else:
@@ -97,19 +109,11 @@ class RecurrentRouter(nn.Module):
     # ------------------------------------------------------------------ pieces
     def set_text_embeddings(self, emb: Tensor) -> None:
         """Store the frozen candidate text embeddings (num_classes, text_dim), in class order."""
-        if self.skill_query and self.query_mode in ("text", "text_id"):
-            if emb.shape != self.text_emb.shape or not torch.isfinite(emb).all():
-                raise ValueError(f"expected finite text embeddings of shape {tuple(self.text_emb.shape)}")
-            with torch.no_grad():
-                self.text_emb.copy_(emb.detach().to(self.text_emb))
+        store_text_embeddings(self, emb)
 
     def queries(self) -> Tensor:
-        if self.query_mode == "text":
-            return self.text_proj(self.text_emb)
-        u = self.id_emb
-        if self.query_mode == "text_id":
-            u = u + self.text_proj(self.text_emb)
-        return u
+        """(K, d) candidate queries, a function of the candidate texts only."""
+        return self.text_proj(self.text_emb)
 
     def _inputs(self, z: Tensor, q: Tensor | None) -> Tensor:
         x = self.z_in(z)
@@ -195,7 +199,7 @@ class MARSRouter(RecurrentRouter):
     def __init__(self, z_dim: int, num_classes: int, modality_dims, q_dim: int = 8, d_model: int = 128,
                  layers: int = 2, d_state: int = 16, window: int = 8, heads: int = 4, dropout: float = 0.1,
                  trunk: str = "mamba", fusion: str = "attention", skill_query: bool = True,
-                 query_mode: str = "text", text_dim: int = 0):
+                 text_dim: int = 0):
         dims = tuple(modality_dims)
         if len(dims) != 4 or sum(dims) != z_dim or min(dims) <= 0:
             raise ValueError("modality_dims must describe z, image, image2, language")
@@ -203,12 +207,11 @@ class MARSRouter(RecurrentRouter):
             raise ValueError(f"unknown fusion {fusion}")
         super().__init__(z_dim, num_classes, trunk=trunk, skill_query=skill_query,
                          q_dim=q_dim, d_model=d_model, layers=layers, d_state=d_state,
-                         window=window, stride=1, heads=heads, dropout=dropout,
-                         query_mode=query_mode, text_dim=text_dim)
+                         window=window, stride=1, heads=heads, dropout=dropout, text_dim=text_dim)
         self.ctor = dict(z_dim=z_dim, num_classes=num_classes, modality_dims=list(dims), q_dim=q_dim,
                          d_model=d_model, layers=layers, d_state=d_state, window=window,
                          heads=heads, dropout=dropout, trunk=trunk, fusion=fusion, skill_query=skill_query,
-                         query_mode=query_mode, text_dim=text_dim)
+                         text_dim=text_dim)
         self.kind = "mars" if trunk == "mamba" else "mars_gru"
         self.needs_modalities = True
         self.modality_dims, self.fusion = dims, fusion

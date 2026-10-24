@@ -1,11 +1,10 @@
 # MARS on LIBERO-Spatial with a frozen SmolVLA generalist and Pickup / Place specialists.
-# Candidate queries come from frozen SigLIP2 descriptions; no learned controller-ID embeddings.
+# Candidate queries come only from frozen SigLIP2 descriptions; there are no skill-ID embeddings.
 router:
   type: mars
   modality_dims: [960, 960, 960, 960]  # RL token, camera 1, camera 2, language (SmolVLA width)
   fusion: attention
   skill_query: true
-  query_mode: text
   use_q: true
   q_dim: 8
   d_model: 128
@@ -24,7 +23,7 @@ text:
 train:
   epochs: 30
   lr: 1.0e-3
-  batch_episodes: 16
+  batch_episodes: 8
   optimizer: adamw
   weight_decay: 1.0e-4
   select_best: true

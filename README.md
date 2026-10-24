@@ -39,8 +39,9 @@ flowchart LR
    bowl by its rim and lift it up"*. The frozen SigLIP2 text encoder embeds the descriptions once.
    A shared trainable projection turns each embedding into a query. The queries run
    self-attention among themselves and cross-attention over the memory. A shared score MLP gives
-   one logit per candidate, and a softmax gives the probabilities. There are no per-controller ID
-   embeddings: the candidate list sets the output order, and permuting it permutes the outputs.
+   one logit per candidate, and a softmax gives the probabilities. The queries come only from the
+   candidate texts; there is no skill-ID input or learned per-controller embedding. The candidate
+   list sets the output order, and permuting it permutes the outputs.
 4. **Skill switching.** The top-scoring controller takes over once its probability reaches tau
    on k consecutive queries (defaults tau = 0.6, k = 2, cooldown 0). Below the threshold the
    current controller keeps control. Every handoff discards the previous controller's queued
@@ -131,14 +132,15 @@ the *deployed* owner after the switcher is replayed.
 |---|---|
 | `mars` | MARS: modality fusion + Mamba memory + candidate-skill text queries |
 | `mars_gru` | the same, with a GRU memory trunk |
-| `mars` + `skill_query: false` | direct linear classifier instead of candidate queries |
-| `mars` + `query_mode: id` / `text_id` | learned ID queries / text + ID queries |
+| `mars` + `skill_query: false` | direct linear classifier instead of candidate queries (ablation) |
 | `mamba_head`, `mamba_query`, `gru_query` | recurrent trunk on the packed vector, without modality fusion |
 | `gru` | GRU recurrent router (comparison) |
 | `windowed_query`, `windowed_tf`, `windowed_xattn` | windowed query router: a causal window of L samples taken `window_stride` steps apart, instead of a dense memory (comparison) |
 
 All kinds share the same interface: `forward_seq(z, q)` for training (causal over time), and
 `init_state()` + `step(z_t, state, q_t)` for streaming. `step` matches `forward_seq` up to floating-point error.
+Every kind that uses candidate queries builds them from the candidate texts. `load_router`
+refuses checkpoints that use learned skill-ID queries.
 
 ## Layout
 

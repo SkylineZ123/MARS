@@ -8,6 +8,7 @@ from torch import nn
 MARS_KINDS = ("mars", "mars_gru")
 RECURRENT_KINDS = ("mamba_head", "mamba_query", "gru_query")  # RecurrentRouter without modality fusion
 WINDOWED_KINDS = ("windowed_tf", "windowed_xattn", "windowed_query")
+QUERY_KINDS = (*MARS_KINDS, *RECURRENT_KINDS, *WINDOWED_KINDS)  # may carry candidate text queries
 LEARNED_KINDS = (*MARS_KINDS, *RECURRENT_KINDS, "gru", *WINDOWED_KINDS)
 # Checkpoints written by the original research code under earlier kind names.
 LEGACY_KINDS = {"fusion_mamba": "mars", "fusion_gru": "mars_gru"}
@@ -16,15 +17,13 @@ LEGACY_KINDS = {"fusion_mamba": "mars", "fusion_gru": "mars_gru"}
 def build_router(kind: str, z_dim: int, num_classes: int, cfg, text_dim: int = 0) -> nn.Module:
     """cfg: MARSConfig. z_dim is the packed input size (sum of modality_dims for MARS)."""
     q_dim = int(cfg.q_dim) if cfg.use_q else 0
-    text = cfg.query_mode in ("text", "text_id")
     if kind in MARS_KINDS:
         from .router import MARSRouter
 
         return MARSRouter(z_dim, num_classes, cfg.modality_dims, q_dim=q_dim, d_model=cfg.d_model,
                           layers=cfg.ssm_layers, d_state=cfg.d_state, window=cfg.window, heads=cfg.heads,
                           dropout=cfg.dropout, trunk="mamba" if kind == "mars" else "gru", fusion=cfg.fusion,
-                          skill_query=cfg.skill_query, query_mode=cfg.query_mode,
-                          text_dim=text_dim if cfg.skill_query and text else 0)
+                          skill_query=cfg.skill_query, text_dim=text_dim if cfg.skill_query else 0)
     if kind in RECURRENT_KINDS:
         from .router import RecurrentRouter
 
@@ -33,7 +32,7 @@ def build_router(kind: str, z_dim: int, num_classes: int, cfg, text_dim: int = 0
                                q_dim=q_dim, d_model=cfg.d_model, layers=cfg.ssm_layers, d_state=cfg.d_state,
                                window=cfg.window, stride=cfg.window_stride, heads=cfg.heads,
                                query_layers=cfg.query_layers, ff_mult=cfg.ff_mult, dropout=cfg.dropout,
-                               query_mode=cfg.query_mode, text_dim=text_dim if sq and text else 0)
+                               text_dim=text_dim if sq else 0)
     if kind == "gru":
         from .baselines import GRURouter
 
@@ -45,17 +44,16 @@ def build_router(kind: str, z_dim: int, num_classes: int, cfg, text_dim: int = 0
         return WindowedQueryRouter(z_dim, num_classes, window=cfg.window, stride=cfg.window_stride, q_dim=q_dim,
                                    d_model=cfg.d_model, heads=cfg.heads, temporal_layers=cfg.temporal_layers,
                                    query_layers=cfg.query_layers, ff_mult=cfg.ff_mult, dropout=cfg.dropout,
-                                   temporal=kind != "windowed_xattn", skill_query=sq, query_mode=cfg.query_mode,
-                                   text_dim=text_dim if sq and text else 0)
+                                   temporal=kind != "windowed_xattn", skill_query=sq,
+                                   text_dim=text_dim if sq else 0)
     raise ValueError(f"no learned router of type {kind!r}")
 
 
 def needs_text(kind: str, cfg) -> bool:
     """True when the router reads frozen candidate text embeddings (set them before training)."""
-    text = cfg.query_mode in ("text", "text_id")
     if kind in MARS_KINDS:
-        return cfg.skill_query and text
-    return kind in ("mamba_query", "gru_query", "windowed_xattn", "windowed_query") and text
+        return cfg.skill_query
+    return kind in ("mamba_query", "gru_query", "windowed_xattn", "windowed_query")
 
 
 def count_params(model: nn.Module) -> int:
@@ -98,11 +96,14 @@ def _from_ctor(kind: str, ctor: dict) -> nn.Module:
 
 def load_router(path, device="cpu") -> tuple[nn.Module, list[str]]:
     payload = torch.load(path, map_location="cpu", weights_only=False)
-    kind, ctor = payload["kind"], dict(payload["ctor"])
-    if kind in LEGACY_KINDS:
-        kind = LEGACY_KINDS[kind]
-        # the earliest fusion checkpoints predate text queries and used learned ID queries
-        ctor.setdefault("query_mode", "id")
+    kind, ctor = LEGACY_KINDS.get(payload["kind"], payload["kind"]), dict(payload["ctor"])
+    # Earlier checkpoints record where the candidate queries came from; the earliest fusion
+    # checkpoints predate text queries and used learned skill-ID queries.
+    mode = ctor.pop("query_mode", "id" if payload["kind"] in LEGACY_KINDS else "text")
+    if kind in QUERY_KINDS:
+        if ctor.get("skill_query", True) and mode != "text":
+            raise ValueError(f"{path} holds learned skill-ID queries (query_mode={mode!r}); "
+                             "MARS builds candidate queries from the candidate texts only")
         ctor.setdefault("text_dim", 0)
     model = _from_ctor(kind, ctor)
     model.load_state_dict(payload["state_dict"])

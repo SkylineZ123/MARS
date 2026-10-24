@@ -26,8 +26,7 @@ class MARSConfig:
     type: str = "mars"
     modality_dims: list[int] = field(default_factory=list)  # [z, image, image2, language] sizes
     fusion: str = "attention"  # attention | concat
-    skill_query: bool = True  # False: direct linear head instead of candidate queries
-    query_mode: str = "text"  # text | id | text_id
+    skill_query: bool = True  # False: direct linear head instead of candidate text queries (ablation)
     use_q: bool = True  # read normalized proprioception q_t next to the packed observation
     q_dim: int = 8
     d_model: int = 128

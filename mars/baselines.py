@@ -7,7 +7,8 @@ WindowedQueryRouter  a causal window of L samples t - k*stride (k = 0..L-1) inst
                        windowed_query  tokens -> time-causal Transformer -> candidate queries -> score MLP
 
 Window samples before the episode start are clamped and flagged as padding. Every sample gives a
-compact-state token (z) and, optionally, a proprioception token (q).
+compact-state token (z) and, optionally, a proprioception token (q). Candidate queries come from the
+frozen candidate texts, as in MARS.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import torch
 from torch import Tensor, nn
 
 from .layers import QueryBlock, SelfBlock, window_indices, window_pad
-from .router import QUERY_MODES
+from .router import check_text_queries, init_text_queries, store_text_embeddings
 
 
 def _join(z: Tensor, q: Tensor | None, q_dim: int) -> Tensor:
@@ -68,21 +69,18 @@ class WindowedQueryRouter(nn.Module):
     def __init__(self, z_dim: int, num_classes: int, window: int = 6, stride: int = 10, q_dim: int = 8,
                  d_model: int = 128, heads: int = 4, temporal_layers: int = 2, query_layers: int = 1,
                  ff_mult: int = 4, dropout: float = 0.1, temporal: bool = True, skill_query: bool = True,
-                 query_mode: str = "text_id", text_dim: int = 0):
+                 text_dim: int = 0):
         super().__init__()
         if not (temporal or skill_query):
             raise ValueError("WindowedQueryRouter needs a temporal encoder, candidate queries, or both")
-        if query_mode not in QUERY_MODES:
-            raise ValueError(f"unknown query_mode {query_mode!r}")
-        if skill_query and query_mode in ("text", "text_id") and text_dim <= 0:
-            raise ValueError("text queries require text_dim > 0")
+        check_text_queries(skill_query, text_dim)
         self.ctor = dict(z_dim=z_dim, num_classes=num_classes, window=window, stride=stride, q_dim=q_dim,
                          d_model=d_model, heads=heads, temporal_layers=temporal_layers, query_layers=query_layers,
                          ff_mult=ff_mult, dropout=dropout, temporal=temporal, skill_query=skill_query,
-                         query_mode=query_mode, text_dim=text_dim)
+                         text_dim=text_dim)
         self.z_dim, self.q_dim, self.num_classes = z_dim, q_dim, num_classes
         self.window, self.stride = window, stride
-        self.temporal, self.skill_query, self.query_mode = temporal, skill_query, query_mode
+        self.temporal, self.skill_query = temporal, skill_query
         self.kind = "windowed_query" if temporal and skill_query else ("windowed_tf" if temporal else "windowed_xattn")
         self.n_mod = 2 if q_dim else 1
         d = d_model
@@ -103,12 +101,7 @@ class WindowedQueryRouter(nn.Module):
             if temporal else None
         self.enc_norm = nn.LayerNorm(d)
         if skill_query:
-            if query_mode != "text":
-                self.id_emb = nn.Parameter(torch.zeros(num_classes, d) if query_mode == "text_id"
-                                           else torch.randn(num_classes, d) * 0.02)
-            if query_mode in ("text", "text_id"):
-                self.register_buffer("text_emb", torch.zeros(num_classes, text_dim))
-                self.text_proj = nn.Sequential(nn.LayerNorm(text_dim), nn.Linear(text_dim, d))
+            init_text_queries(self, num_classes, text_dim, d)
             self.query_blocks = nn.ModuleList([QueryBlock(d, heads, ff_mult, dropout) for _ in range(query_layers)])
             self.score = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d), nn.GELU(), nn.Linear(d, 1))
         else:
@@ -116,20 +109,10 @@ class WindowedQueryRouter(nn.Module):
 
     # ------------------------------------------------------------------ pieces
     def set_text_embeddings(self, emb: Tensor) -> None:
-        if not (self.skill_query and self.query_mode in ("text", "text_id")):
-            return
-        if tuple(emb.shape) != tuple(self.text_emb.shape) or not torch.isfinite(emb).all():
-            raise ValueError(f"text embeddings {tuple(emb.shape)} != {tuple(self.text_emb.shape)}")
-        with torch.no_grad():
-            self.text_emb.copy_(emb.detach().to(self.text_emb))
+        store_text_embeddings(self, emb)
 
     def queries(self) -> Tensor:
-        if self.query_mode == "text":
-            return self.text_proj(self.text_emb)
-        u = self.id_emb
-        if self.query_mode == "text_id":
-            u = u + self.text_proj(self.text_emb)
-        return u
+        return self.text_proj(self.text_emb)
 
     def _step_tokens(self, z: Tensor, q: Tensor | None) -> Tensor:
         """Per-step tokens (..., n_mod, d) before windowing (projection does not depend on the window)."""

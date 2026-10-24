@@ -8,7 +8,7 @@ from .router import MARSRouter, RecurrentRouter, pack_modalities
 from .switch import SkillSwitcher, replay_switch
 from .train import predict, train_router
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "DEFAULT_SKILL_TEXT", "GRURouter", "LEARNED_KINDS", "MARSConfig", "MARSController", "MARSRouter",
