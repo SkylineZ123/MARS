@@ -22,7 +22,7 @@ def make_model(kind="mars", **overrides):
     return model, cfg
 
 
-@pytest.mark.parametrize("kind", ["mars", "mars_gru", "mamba_query", "gru_query", "windowed_query"])
+@pytest.mark.parametrize("kind", ["mars", "mars_gru", "mamba_query", "gru_query", "windowed_query", "single_frame"])
 def test_text_queries_causal_step_and_roundtrip(kind, tmp_path):
     torch.manual_seed(3)
     model, cfg = make_model(kind)
@@ -87,13 +87,13 @@ def _resave(model, path, kind, **ctor):
 
 def test_checkpoints_from_earlier_versions(tmp_path):
     torch.manual_seed(0)
-    model, _ = make_model()
+    model, _ = make_model("multimodal_mars")
     model.eval()
     z, q = torch.randn(1, 7, 16), torch.randn(1, 7, 3)
     expected = model.forward_seq(z, q)
     # text-query checkpoints of the research code: old kind name, query source recorded in ctor
     restored, _ = load_router(_resave(model, tmp_path / "text.pt", "fusion_mamba", query_mode="text"))
-    assert restored.kind == "mars" and "query_mode" not in restored.ctor
+    assert restored.kind == "multimodal_mars" and "query_mode" not in restored.ctor
     torch.testing.assert_close(restored.forward_seq(z, q), expected)
     # learned skill-ID queries are no longer part of MARS
     for kind, mode in (("mars", "id"), ("mars", "text_id"), ("fusion_mamba", "id")):
@@ -103,9 +103,9 @@ def test_checkpoints_from_earlier_versions(tmp_path):
     with pytest.raises(ValueError, match="skill-ID"):  # the earliest fusion checkpoints used ID queries
         load_router(_resave(model, tmp_path / "earliest.pt", "fusion_mamba"))
     # a direct-head checkpoint has no queries, whatever query source it recorded
-    head, _ = make_model(skill_query=False)
+    head, _ = make_model("multimodal_mars", skill_query=False)
     restored, _ = load_router(_resave(head, tmp_path / "head.pt", "fusion_mamba", query_mode="id"))
-    assert restored.kind == "mars" and not restored.skill_query
+    assert restored.kind == "multimodal_mars" and not restored.skill_query
 
 
 @pytest.mark.parametrize("kind", LEARNED_KINDS)
@@ -140,7 +140,7 @@ def test_invalid_configuration():
     with pytest.raises(ValueError, match="expected finite text embeddings"):
         make_model()[0].set_text_embeddings(torch.randn(2, 12))
     with pytest.raises(ValueError, match="modality_dims"):
-        build_router("mars", 16, 3, MARSConfig(modality_dims=[4, 4, 4]), text_dim=8)
+        build_router("multimodal_mars", 16, 3, MARSConfig(modality_dims=[4, 4, 4]), text_dim=8)
     with pytest.raises(ValueError, match="unknown MARS config keys"):
         MARSConfig.from_dict({"router": {"query_mode": "id"}})
 
@@ -148,10 +148,10 @@ def test_invalid_configuration():
 def test_shipped_config_builds_the_paper_router():
     cfg = MARSConfig.from_yaml(Path(__file__).parents[1] / "configs" / "mars.yaml")
     assert cfg.type == "mars" and cfg.skill_query and (cfg.switch_tau, cfg.switch_k) == (0.6, 2)
-    model = build_router(cfg.type, sum(cfg.modality_dims), 3, cfg, text_dim=768)
+    model = build_router(cfg.type, cfg.z_dim, 3, cfg, text_dim=768)
     assert model.kind == "mars" and model.window == 8
     assert not any("id_emb" in n for n in model.state_dict())
-    assert count_params(model) == 1_382_161  # SigLIP2 ViT-B-16 text width 768, three candidates
+    assert count_params(model) == 1_021_953  # SigLIP2 ViT-B-16 text width 768, three candidates
 
 
 # ---------------------------------------------------------------- recurrent trunk without fusion
@@ -241,3 +241,27 @@ def test_gru_router_step_matches_sequence():
     for t in range(10):
         p, state = model.step(z[0, t], state, q[0, t])
         assert torch.allclose(p, seq[t], atol=1e-5)
+
+
+def test_old_multimodal_payload_stays_explicit(tmp_path):
+    model, _ = make_model('multimodal_mars')
+    model.kind = 'mars'  # pre-migration checkpoint
+    path = tmp_path / 'old.pt'
+    save_router(path, model, CLASSES)
+    restored, _ = load_router(path)
+    assert restored.kind == 'multimodal_mars' and restored.needs_modalities
+    payload = torch.load(path, weights_only=False)
+    payload['input_format'] = 'rltoken_q'
+    torch.save(payload, path)
+    with pytest.raises(ValueError, match='input format'):
+        load_router(path)
+
+
+def test_single_frame_has_no_dependency_on_past():
+    model, _ = make_model('single_frame')
+    model.eval()
+    z, q = torch.randn(1, 10, 16), torch.randn(1, 10, 3)
+    expected = model.forward_seq(z, q)[:, -1]
+    z[:, :-1] += 50
+    q[:, :-1] -= 50
+    torch.testing.assert_close(model.forward_seq(z, q)[:, -1], expected)

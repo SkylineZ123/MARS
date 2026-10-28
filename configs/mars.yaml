@@ -2,7 +2,7 @@
 # Candidate queries come only from frozen SigLIP2 descriptions; there are no skill-ID embeddings.
 router:
   type: mars
-  modality_dims: [960, 960, 960, 960]  # RL token, camera 1, camera 2, language (SmolVLA width)
+  z_dim: 960  # router reads only RL Token and normalized proprioception
   fusion: attention
   skill_query: true
   use_q: true
@@ -11,6 +11,7 @@ router:
   heads: 4
   dropout: 0.1
   ssm_layers: 2
+  query_layers: 2
   d_state: 16
   window: 8
 text:

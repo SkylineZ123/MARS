@@ -11,7 +11,7 @@ MARS 在每个控制步决定**由哪个控制器执行**：冻结的通用视�
 ```mermaid
 flowchart LR
     O[图像、任务文本、本体状态] --> F[冻结 VLA 与共享 RL Token]
-    F --> M[多模态注意力融合]
+    F --> M[RL Token 与本体状态投影相加]
     M --> S[因果 Mamba 记忆]
     S --> H[最近 L 个记忆状态作为 K/V]
     T[候选控制器能力描述] --> E[冻结 SigLIP2 文本编码并缓存]
@@ -23,12 +23,12 @@ flowchart LR
     W --> C[调用 VLA 或选中的专家]
 ```
 
-1. **模态融合**：RL Token z_t、两个相机和任务语言的池化特征、归一化本体状态 q_t 分别投影。一层 Transformer 混合各模态，再由一个可学习的注意力查询池化为每步一个 token。
+1. **状态嵌入**：路由器只输入共享 RL Token z_t 和归一化本体状态 q_t，分别投影、归一化后相加。双视角图像与任务语言经冻结 VLA 和适配器形成 RL Token。
 2. **因果记忆**：选择性状态空间（Mamba）主干每次路由查询推进一步，部署时每步 O(1)。保留最近 L = 8 个主干输出作为键和值。
 3. **候选技能查询**：每个候选用文本描述，例如 *"grasp the black bowl by its rim and lift it up"*。冻结的 SigLIP2 文本编码器只编码一次。共享的可训练投影把每个描述变为查询，查询之间做自注意力，并对记忆做交叉注意力。共享打分 MLP 为每个候选输出一个 logit，softmax 给出概率。查询只来自候选文本，不输入技能 ID，也没有逐控制器的可学习嵌入。候选列表决定输出顺序，打乱候选顺序，输出也按同样方式重排。
 4. **技能切换**：分数最高的控制器在连续 k 次查询中概率都达到 tau，才接管控制（默认 tau = 0.6、k = 2、冷却期 0）。低于阈值时保持当前控制器。每次交接都会丢弃旧控制器已排队的动作块，并在同一步立即查询新控制器。
 
-默认配置（`configs/mars.yaml`，SmolVLA 特征宽度 960，三个候选）下，MARS 有 1,382,161 个可训练参数。
+默认配置（`configs/mars.yaml`，SmolVLA 特征宽度 960，三个候选）下，MARS 有 1,021,953 个可训练参数。
 
 ## 安装
 
@@ -41,7 +41,7 @@ python examples/train_synthetic.py
 
 ## 使用
 
-### 1. 编码候选描述（只需一次）
+### 1. 编码候选描述
 
 ```bash
 python -m mars.text --config configs/mars.yaml --classes vla pickup place --output siglip2_text.pt
@@ -58,10 +58,10 @@ from mars.text import candidate_embeddings
 cfg = MARSConfig.from_yaml("configs/mars.yaml")
 classes = ["vla", "pickup", "place"]                  # 0 号为通用策略
 text, spec = candidate_embeddings(cfg, classes, out_dir="cache")
-router = build_router(cfg.type, sum(cfg.modality_dims), len(classes), cfg, text_dim=text.shape[1])
+router = build_router(cfg.type, cfg.z_dim, len(classes), cfg, text_dim=text.shape[1])
 router.set_text_embeddings(text)
 
-# train_seqs / val_seqs：每个 episode 一个 (z (T, sum(modality_dims)), y (T,), q (T, q_dim))
+# train_seqs / val_seqs：每个 episode 一个 (z (T, z_dim), y (T,), q (T, q_dim))
 result = train_router(router, train_seqs, val_seqs, cfg, seed=cfg.seed)
 save_router("mars.pt", router, classes, extra={"text_spec": spec})
 ```
@@ -71,12 +71,12 @@ save_router("mars.pt", router, classes, extra={"text_spec": spec})
 ### 3. 部署
 
 ```python
-from mars import MARSController, pack_modalities
+from mars import MARSController
 
 ctrl = MARSController.from_checkpoint("mars.pt", cfg)
 ctrl.reset()                                           # 每个 episode 开始时
 for t in range(max_steps):
-    z_t = pack_modalities(prefix_features, rl_token)[0]   # (sum(modality_dims),)
+    z_t = rl_token[0]   # (z_dim,)
     active, switched, probs = ctrl.query(z_t, q_t)
     if switched:
         action_queue.clear()                           # 旧控制器的动作块已失效
@@ -108,7 +108,7 @@ python -m mars.rltoken --help              # adapter 训练、窗口构造、专
 
 | 输入 | 形状 | 来源 |
 |---|---|---|
-| `z_t` | `sum(modality_dims)` | `pack_modalities(features, z)`：[RL Token、相机 1 均值、相机 2 均值、语言均值] |
+| `z_t` | `z_dim` | 共享适配器输出；图像与语言在上游编码 |
 | `q_t` | `q_dim` | 归一化本体状态 |
 | `y_t`（仅训练） | 标量 | 控制器标签，0 为通用策略 |
 
@@ -118,7 +118,7 @@ python -m mars.rltoken --help              # adapter 训练、窗口构造、专
 
 | 类型 | 说明 |
 |---|---|
-| `mars` | MARS：模态融合 + Mamba 记忆 + 候选技能文本查询 |
+| `mars` | MARS：RL Token 与本体状态 + Mamba 记忆 + 候选技能文本查询 |
 | `mars_gru` | 同上，记忆主干换为 GRU |
 | `mars` + `skill_query: false` | 用直接线性分类头代替候选查询（消融） |
 | `mamba_head`、`mamba_query`、`gru_query` | 在打包向量上直接使用循环主干，不做模态融合 |

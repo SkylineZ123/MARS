@@ -69,7 +69,7 @@ class WindowedQueryRouter(nn.Module):
     def __init__(self, z_dim: int, num_classes: int, window: int = 6, stride: int = 10, q_dim: int = 8,
                  d_model: int = 128, heads: int = 4, temporal_layers: int = 2, query_layers: int = 1,
                  ff_mult: int = 4, dropout: float = 0.1, temporal: bool = True, skill_query: bool = True,
-                 text_dim: int = 0):
+                 text_dim: int = 0, state_fusion: str = "tokens"):
         super().__init__()
         if not (temporal or skill_query):
             raise ValueError("WindowedQueryRouter needs a temporal encoder, candidate queries, or both")
@@ -77,12 +77,13 @@ class WindowedQueryRouter(nn.Module):
         self.ctor = dict(z_dim=z_dim, num_classes=num_classes, window=window, stride=stride, q_dim=q_dim,
                          d_model=d_model, heads=heads, temporal_layers=temporal_layers, query_layers=query_layers,
                          ff_mult=ff_mult, dropout=dropout, temporal=temporal, skill_query=skill_query,
-                         text_dim=text_dim)
+                         text_dim=text_dim, state_fusion=state_fusion)
         self.z_dim, self.q_dim, self.num_classes = z_dim, q_dim, num_classes
         self.window, self.stride = window, stride
         self.temporal, self.skill_query = temporal, skill_query
         self.kind = "windowed_query" if temporal and skill_query else ("windowed_tf" if temporal else "windowed_xattn")
-        self.n_mod = 2 if q_dim else 1
+        self.state_fusion = state_fusion
+        self.n_mod = 2 if q_dim and state_fusion == "tokens" else 1
         d = d_model
 
         self.z_in = nn.Sequential(nn.Linear(z_dim, d), nn.LayerNorm(d))
@@ -121,7 +122,7 @@ class WindowedQueryRouter(nn.Module):
             if q is None:
                 raise ValueError("this router was built with proprio tokens; pass q")
             toks.append(self.q_in(q))
-        return torch.stack(toks, dim=-2) + self.mod_emb
+        return (sum(toks).unsqueeze(-2) if self.state_fusion == "sum" else torch.stack(toks, dim=-2)) + self.mod_emb
 
     def forward_windows(self, tok: Tensor, pad: Tensor, return_attn: bool = False):
         """tok (M, L, n_mod, d) per-step tokens of each window (age-major), pad (M, L) -> logits (M, K)."""

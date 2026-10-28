@@ -82,7 +82,7 @@ def test_switch_immediately_discards_both_generalist_and_expert_queues():
     adapter = make_adapter().eval()
     cfg = MARSConfig(modality_dims=[8, 4, 4, 4], q_dim=3, d_model=8, heads=2, ssm_layers=1,
                      dropout=0, skill_query=False)
-    router = build_router("mars", 20, 2, cfg)
+    router = build_router("mars", 8, 2, cfg)
     ctrl = MARSController(router, ["vla", "pickup"], tau=0.6, k=1)
     ref_calls = []
     class Expert(IdentitySpecialist):

@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from mars import MARSConfig, MARSController, build_router, pack_modalities, save_router, train_router
+from mars import MARSConfig, MARSController, build_router, save_router, train_router
 from mars.rltoken import (
     AdapterSpec, AdapterTrainConfig, EpisodeLog, PHASE_WARMUP, PrefixFeatures, RLTAdapter,
     ReplayBuffer, RoutedRLTPolicy, SOURCE_VLA, SpecialistConfig, SpecialistLearner, build_windows,
@@ -55,10 +55,10 @@ def main():
 
         f = PrefixFeatures(hidden[:T], {"image": slice(0, 2), "image2": slice(2, 4), "lang": slice(4, 6)},
                            {g: torch.ones(T, 2, dtype=torch.bool) for g in ("image", "image2", "lang")})
-        packed = pack_modalities(f, torch.from_numpy(z[:T])).numpy()
-        router_cfg = MARSConfig(modality_dims=[d] * 4, q_dim=q_dim, d_model=16, heads=2, dropout=0,
+        packed = z[:T]
+        router_cfg = MARSConfig(z_dim=d, q_dim=q_dim, d_model=16, heads=2, dropout=0,
                                 skill_query=False, ssm_layers=1, epochs=2, batch_episodes=1)
-        router = build_router("mars", d * 4, 2, router_cfg)
+        router = build_router("mars", d, 2, router_cfg)
         # Direct classification head is the existing MARS ablation, avoiding a text model download.
         train_router(router, [(packed, owner, q[:T])], [(packed, owner, q[:T])], router_cfg,
                      log=lambda _: None)

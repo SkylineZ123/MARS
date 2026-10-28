@@ -1,25 +1,8 @@
-"""MARS: Memory-Augmented Router for atomic Skills.
+"""Paper MARS: RL Token + proprioception, causal memory and text skill queries.
 
-At every router query MARS reads the current multimodal observation, updates a dense causal
-memory of the whole episode, and scores every candidate controller (the generalist VLA and the
-atomic-skill specialists):
-
-  1. modality fusion   [RL token z_t, camera 1, camera 2, language] + proprioception q_t are
-                       projected per modality, mixed by one Transformer layer and pooled by a
-                       learned attention query into one token per step;
-  2. causal memory     a selective-SSM (Mamba) trunk advances its state by one step per query
-                       (O(1) at deployment) and keeps the last L trunk outputs as keys/values;
-  3. skill queries     one query per candidate, projected from a frozen text embedding of the
-                       candidate's capability description, runs query self-attention and
-                       cross-attention over the memory; a shared score MLP gives one logit per
-                       candidate, and softmax gives the probabilities handed to the switcher.
-
-The queries depend only on the candidate texts: there is no learned per-controller ID embedding,
-so the candidate list fixes the output order and permuting it permutes the outputs.
-
-`RecurrentRouter` is the trunk + head without modality fusion (single packed input vector);
-`MARSRouter` adds the fusion stage. With `skill_query=False` the query head is replaced by a
-direct linear classifier (ablation).
+MARSRouter implements the paper's separately projected, normalized and summed
+state embedding. MultimodalFusionRouter retains the earlier four-input variant
+for explicitly identified legacy checkpoints only.
 """
 
 from __future__ import annotations
@@ -188,7 +171,7 @@ class RecurrentRouter(nn.Module):
         return torch.softmax(logits[0], dim=-1), state
 
 
-class MARSRouter(RecurrentRouter):
+class MultimodalFusionRouter(RecurrentRouter):
     """Explicit modality fusion followed by the causal recurrent trunk and the skill-query head.
 
     The packed input z is [z_rl, camera_1, camera_2, language] (see `pack_modalities`, sizes in
@@ -245,3 +228,36 @@ class MARSRouter(RecurrentRouter):
         else:
             result = self.fuse(tokens.flatten(1))
         return self.drop(result.reshape(*shape, result.shape[-1]))
+
+
+class MARSRouter(RecurrentRouter):
+    """Paper MARS: RL Token and proprioception, projected separately and summed."""
+
+    needs_modalities = False
+
+    def __init__(self, z_dim, num_classes, q_dim=8, d_model=128, layers=2,
+                 d_state=16, window=8, heads=4, dropout=0.1, trunk="mamba",
+                 skill_query=True, text_dim=0, query_layers=2, ff_mult=4):
+        super().__init__(z_dim, num_classes, trunk=trunk, skill_query=skill_query,
+                         q_dim=q_dim, d_model=d_model, layers=layers, d_state=d_state,
+                         window=window, heads=heads, dropout=dropout, text_dim=text_dim,
+                         query_layers=query_layers, ff_mult=ff_mult)
+        self.kind = "mars" if trunk == "mamba" else "mars_gru"
+        self.ctor.pop("stride")
+
+
+class SingleFrameRouter(RecurrentRouter):
+    """Same embedding and text head, with an identity trunk and one current token."""
+
+    needs_modalities = False
+
+    def __init__(self, z_dim, num_classes, q_dim=8, d_model=128, heads=4,
+                 dropout=0.1, text_dim=0, query_layers=2, ff_mult=4):
+        super().__init__(z_dim, num_classes, q_dim=q_dim, d_model=d_model,
+                         layers=0, window=1, heads=heads, dropout=dropout,
+                         text_dim=text_dim, query_layers=query_layers, ff_mult=ff_mult,
+                         skill_query=True)
+        self.kind = "single_frame"
+        self.ctor = dict(z_dim=z_dim, num_classes=num_classes, q_dim=q_dim,
+                         d_model=d_model, heads=heads, dropout=dropout, text_dim=text_dim,
+                         query_layers=query_layers, ff_mult=ff_mult)

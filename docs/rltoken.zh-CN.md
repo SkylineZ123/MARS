@@ -153,7 +153,7 @@ Actor 输出完整动作块；reference 作为输入和训练约束。按原实�
 
 ## 4. 接入 MARS 执行
 
-先按现有流程使用 `pack_modalities(features, adapter.encode_features(features))` 生成路由训练特征，
+先按现有流程使用 `adapter.encode_features(features)` 生成路由训练特征，
 训练并保存 MARS。然后绑定每个候选专家：
 
 ```python

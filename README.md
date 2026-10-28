@@ -4,8 +4,9 @@
 
 MARS decides, at every control step, **which controller should act**: a frozen generalist
 vision-language-action (VLA) policy or one of several atomic-skill specialists (for example
-*Pickup* and *Place*). It reads the current multimodal observation, keeps a dense causal memory
-of the episode, and scores every candidate controller through a query built from that
+*Pickup* and *Place*). Its input at each step is the shared RL Token (which carries the images and task language
+through the frozen VLA) and the normalized proprioception. It keeps a dense causal memory
+of the episode and scores every candidate controller through a query built from that
 controller's plain-language capability description. A k-of-k confirmation rule turns the scores
 into reliable handoffs.
 
@@ -19,7 +20,7 @@ from RL-Token-Pi05-open's `routerlt` implementation; see the [integration guide]
 ```mermaid
 flowchart LR
     O[Images, task text, proprioception] --> F[Frozen VLA + shared RL token]
-    F --> M[Multimodal attention fusion]
+    F --> M[RL Token + proprioception embedding]
     M --> S[Causal Mamba memory]
     S --> H[Last L memory states as K/V]
     T[Candidate capability descriptions] --> E[Frozen SigLIP2 text encoder, cached once]
@@ -31,15 +32,17 @@ flowchart LR
     W --> C[Run the VLA or the selected specialist]
 ```
 
-1. **Modality fusion.** The RL token z_t, mean-pooled features of two cameras and of the task
-   language, and the normalized proprioception q_t are projected per modality. One Transformer
-   layer mixes them, and a learned attention query pools them into one token per step.
-2. **Causal memory.** A selective state-space (Mamba) trunk advances its state by one step per
-   router query (O(1) at deployment). The last L = 8 trunk outputs are kept as keys and values.
+1. **State embedding.** Only the shared RL Token z_t and normalized proprioception q_t
+   enter the router. z_t goes through Linear + LayerNorm, q_t through a two-layer MLP + LayerNorm,
+   and the two results are summed (d_model = 128) with dropout. Images and task language
+   are not router inputs; they reach it through the frozen VLA and the RL Token adapter.
+2. **Causal memory.** A two-layer selective state-space (Mamba) trunk advances its state by one
+   step per router query (O(1) at deployment). The last L = 8 trunk outputs, plus a learned
+   embedding of their age, are kept as keys and values.
 3. **Candidate-skill queries.** Each candidate is described in text, for example *"grasp the black
    bowl by its rim and lift it up"*. The frozen SigLIP2 text encoder embeds the descriptions once.
-   A shared trainable projection turns each embedding into a query. The queries run
-   self-attention among themselves and cross-attention over the memory. A shared score MLP gives
+   A shared trainable projection turns each embedding into a query. The queries pass through two
+   blocks of self-attention among themselves, cross-attention over the memory and a feed-forward layer. A shared score MLP gives
    one logit per candidate, and a softmax gives the probabilities. The queries come only from the
    candidate texts; there is no skill-ID input or learned per-controller embedding. The candidate
    list sets the output order, and permuting it permutes the outputs.
@@ -49,20 +52,20 @@ flowchart LR
    action chunk and queries the new controller at the same step.
 
 With the default configuration (`configs/mars.yaml`, SmolVLA feature width 960, three
-candidates), MARS has 1,382,161 trainable parameters.
+candidates and the 768-wide SigLIP2 text embedding), MARS has 1,021,953 trainable parameters.
 
 ## Install
 
 ```bash
 pip install -e ".[test]"          # torch, numpy, pyyaml (+ pytest)
 pip install -e ".[siglip2]"       # only needed to encode new candidate descriptions
-pytest                            # CPU unit tests, about 15 s
+pytest                            # CPU unit tests
 python examples/train_synthetic.py
 ```
 
 ## Usage
 
-### 1. Encode the candidate descriptions (once)
+### 1. Encode the candidate descriptions
 
 ```bash
 python -m mars.text --config configs/mars.yaml --classes vla pickup place --output siglip2_text.pt
@@ -80,26 +83,26 @@ from mars.text import candidate_embeddings
 cfg = MARSConfig.from_yaml("configs/mars.yaml")
 classes = ["vla", "pickup", "place"]                  # index 0 is the generalist
 text, spec = candidate_embeddings(cfg, classes, out_dir="cache")
-router = build_router(cfg.type, sum(cfg.modality_dims), len(classes), cfg, text_dim=text.shape[1])
+router = build_router(cfg.type, cfg.z_dim, len(classes), cfg, text_dim=text.shape[1])
 router.set_text_embeddings(text)
 
-# train_seqs / val_seqs: lists of (z (T, sum(modality_dims)), y (T,), q (T, q_dim)) per episode
+# train_seqs / val_seqs: lists of (z (T, z_dim), y (T,), q (T, q_dim)) per episode
 result = train_router(router, train_seqs, val_seqs, cfg, seed=cfg.seed)
 save_router("mars.pt", router, classes, extra={"text_spec": spec})
 ```
 
-The loss is cross-entropy weighted by inverse label frequency. With `select_best` the epoch with
+Labels equal to `mars.train.IGNORE` (-100) are skipped. The loss is cross-entropy weighted by inverse label frequency. With `select_best` the epoch with
 the best validation `selection_metric` (macro-F1 by default) is kept.
 
 ### 3. Deploy
 
 ```python
-from mars import MARSController, pack_modalities
+from mars import MARSController
 
 ctrl = MARSController.from_checkpoint("mars.pt", cfg)
 ctrl.reset()                                           # at every episode start
 for t in range(max_steps):
-    z_t = pack_modalities(prefix_features, rl_token)[0]   # (sum(modality_dims),)
+    z_t = rl_token[0]   # (z_dim,)
     active, switched, probs = ctrl.query(z_t, q_t)
     if switched:
         action_queue.clear()                           # the old controller's chunk is invalid
@@ -153,24 +156,29 @@ controller and ground-truth skill labels (`pickup`, `insert`). It needs `pip ins
 
 | Input | Shape | Source |
 |---|---|---|
-| `z_t` | `sum(modality_dims)` | `pack_modalities(features, z)`: [RL token, mean(camera 1), mean(camera 2), mean(language)] |
-| `q_t` | `q_dim` | normalized proprioception |
-| `y_t` (training only) | scalar | controller label, 0 = generalist |
+| `z_t` | `z_dim` | shared RL Token from the adapter; images and language are encoded upstream |
+| `q_t` | `q_dim` | normalized proprioception (`use_q: false` drops it) |
+| `y_t` | scalar | controller label, 0 = generalist |
 
-`features` is the frozen VLA prefix of the current observation. It must provide `.hidden`
-`(B, N, d)`, `.slices` (token ranges named `image`, `image2` and `lang`) and `.group_masks`
-(token validity per range). No phase, progress, reward or simulator state enters the router.
+Training sequences are per-episode tuples `(z, y, q)`. Candidate descriptions are not a per-step
+input: they are encoded once into a `(num_classes, text_dim)` array and set with `set_text_embeddings`.
+No phase, progress, reward or simulator state enters the router.
+
+`pack_modalities` and the `multimodal_mars` / `multimodal_mars_gru` kinds are the earlier
+four-input variant (`[z, mean(image), mean(image2), mean(language)]`, sized by `modality_dims`).
+They are kept only for legacy checkpoints; `fusion` and `modality_dims` in the config apply to them alone.
 
 ## Router kinds
 
 | Kind | Description |
 |---|---|
-| `mars` | MARS: modality fusion + Mamba memory + candidate-skill text queries |
+| `mars` | MARS: RL Token + proprioception + Mamba memory + candidate-skill text queries |
 | `mars_gru` | the same, with a GRU memory trunk |
 | `mars` + `skill_query: false` | direct linear classifier instead of candidate queries (ablation) |
-| `mamba_head`, `mamba_query`, `gru_query` | recurrent trunk on the packed vector, without modality fusion |
-| `gru` | GRU recurrent router (comparison) |
-| `windowed_query`, `windowed_tf`, `windowed_xattn` | windowed query router: a causal window of L samples taken `window_stride` steps apart, instead of a dense memory (comparison) |
+| `single_frame` | same embedding and text queries, no memory trunk: the current step only (ablation) |
+| `mamba_head`, `mamba_query`, `gru_query` | recurrent trunk on the same RL Token + proprioception embedding; `mamba_head` has a linear head, the query kinds read a memory window spaced by `window_stride` |
+| `gru` | GRU on the concatenated `[z, q]`, linear head (comparison) |
+| `windowed_query`, `windowed_tf`, `windowed_xattn` | windowed query router: a causal window of L samples taken `window_stride` steps apart, instead of a dense memory; z and q are summed per sample (comparison) |
 
 All kinds share the same interface: `forward_seq(z, q)` for training (causal over time), and
 `init_state()` + `step(z_t, state, q_t)` for streaming. `step` matches `forward_seq` up to floating-point error.
@@ -181,7 +189,7 @@ refuses checkpoints that use learned skill-ID queries.
 
 ```
 mars/
-  router.py      MARSRouter, RecurrentRouter, pack_modalities
+  router.py      MARSRouter, SingleFrameRouter, RecurrentRouter, legacy MultimodalFusionRouter, pack_modalities
   layers.py      MambaBlock, QueryBlock, SelfBlock, window helpers
   baselines.py   GRURouter, WindowedQueryRouter
   text.py        SigLIP2 candidate-text encoding and validated cache

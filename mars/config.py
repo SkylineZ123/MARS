@@ -23,6 +23,7 @@ SECTIONS = ("router", "text", "train", "switch")
 class MARSConfig:
     # ---- router (mars | mars_gru; ablations: mamba_head | mamba_query | gru_query | gru |
     #      windowed_query | windowed_tf | windowed_xattn)
+    z_dim: int = 960  # shared RL Token, paper input
     type: str = "mars"
     modality_dims: list[int] = field(default_factory=list)  # [z, image, image2, language] sizes
     fusion: str = "attention"  # attention | concat
@@ -37,7 +38,7 @@ class MARSConfig:
     window: int = 8  # MARS: last L trunk states the queries read; windowed router: L samples
     window_stride: int = 1  # env steps between window samples (windowed router)
     temporal_layers: int = 2  # windowed router
-    query_layers: int = 1
+    query_layers: int = 2
     ff_mult: int = 4
     proj_dim: int = 256  # GRU router
     hidden: int = 256  # GRU router
@@ -49,7 +50,7 @@ class MARSConfig:
     # ---- training
     epochs: int = 30
     lr: float = 1e-3
-    batch_episodes: int = 16
+    batch_episodes: int = 8
     optimizer: str = "adamw"  # adam | adamw
     weight_decay: float = 1e-4
     select_best: bool = True  # keep the epoch with the best validation `selection_metric`

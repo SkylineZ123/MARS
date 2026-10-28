@@ -87,3 +87,66 @@ def selector_report(preds: list[np.ndarray], labels: list[np.ndarray], num_class
 
 def switch_tag(tau: float, k: int) -> str:
     return f"switch_t{tau:g}_k{k}"
+
+
+def labeled_segments(sequence):
+    """Half-open intervals; VLA (class 0) is a real controller, not background."""
+    sequence = np.asarray(sequence, dtype=np.int64)
+    if not len(sequence):
+        return []
+    starts = np.r_[0, np.flatnonzero(np.diff(sequence)) + 1]
+    ends = np.r_[starts[1:], len(sequence)]
+    return [(int(sequence[s]), int(s), int(e)) for s, e in zip(starts, ends)]
+
+
+def normalized_edit(pred, label):
+    a = [c for c, _, _ in labeled_segments(pred)]
+    b = [c for c, _, _ in labeled_segments(label)]
+    previous = list(range(len(b) + 1))
+    for i, x in enumerate(a, 1):
+        row = [i]
+        for j, y in enumerate(b, 1):
+            row.append(min(row[-1] + 1, previous[j] + 1, previous[j - 1] + (x != y)))
+        previous = row
+    return 100.0 * (1 - previous[-1] / max(len(a), len(b))) if a or b else 100.0
+
+
+def segment_counts(pred, label, overlap):
+    truth = labeled_segments(label)
+    hits = set()
+    tp = fp = 0
+    for c, s, e in labeled_segments(pred):
+        scores = [max(0, min(e, ye) - max(s, ys)) / (max(e, ye) - min(s, ys))
+                  if c == yc else 0.0 for yc, ys, ye in truth]
+        j = int(np.argmax(scores)) if scores else -1
+        if j >= 0 and scores[j] >= overlap and j not in hits:
+            tp += 1
+            hits.add(j)
+        else:
+            fp += 1
+    return np.array([tp, fp, len(truth) - len(hits)], dtype=np.int64)
+
+
+def segmentation_report(preds, labels, num_classes=3):
+    """Table 5: frame metrics pooled; Edit/switches per episode; segment F1 pooled."""
+    if not preds or len(preds) != len(labels):
+        raise ValueError("provide matching nonempty episode lists")
+    for p, y in zip(preds, labels, strict=True):
+        if len(p) != len(y) or not len(y):
+            raise ValueError("episode predictions and labels must have equal nonzero lengths")
+        if min(np.min(p), np.min(y)) < 0 or max(np.max(p), np.max(y)) >= num_classes:
+            raise ValueError("controller label out of range")
+    p, y = np.concatenate(preds), np.concatenate(labels)
+    f1 = []
+    for c in range(num_classes):
+        tp = np.sum((p == c) & (y == c))
+        denom = np.sum(p == c) + np.sum(y == c)
+        f1.append(2 * tp / denom if denom else 0.)
+    out = {"Acc": 100. * float(np.mean(p == y)), "Macro-F1": 100. * float(np.mean(f1)),
+           "Edit": float(np.mean([normalized_edit(p, y) for p, y in zip(preds, labels)])),
+           "switches": float(np.mean([np.count_nonzero(np.diff(p)) for p in preds])),
+           "n_episodes": len(preds), "n_steps": len(y)}
+    for pct in (10, 25, 50):
+        tp, fp, fn = np.sum([segment_counts(p, y, pct / 100) for p, y in zip(preds, labels)], axis=0)
+        out[f"F1@{pct}"] = float(200 * tp / (2 * tp + fp + fn)) if 2 * tp + fp + fn else 0.
+    return out

@@ -11,7 +11,7 @@
             action_queue.extend(policies[ctrl.active_name](obs))
         env.step(action_queue.popleft())
 
-`z_t` is the packed observation (`router.pack_modalities` for MARS), `q_t` the normalized
+`z_t` is the shared RL Token, `q_t` the normalized
 proprioception. Output index i of the router is controller `classes[i]`; index 0 is the
 generalist that holds control at the episode start.
 """
