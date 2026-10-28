@@ -98,6 +98,12 @@ python -m mars.rltoken --help              # adapter 训练、窗口构造、专
 
 配置为 `configs/rltoken.yaml`；Python API 位于 `mars.rltoken`。详见 [训练数据、在线更新与部署](docs/rltoken.zh-CN.md)。
 
+## 试管搬运仿真
+
+`mars.tubes` 是基于 robosuite 1.4 / MuJoCo 的 Panda 试管搬运工作台（`tubes_v2`）：三支试管从固定源架依次插入位姿随机化的目标架，
+自带特权脚本控制器和真值技能标签（`pickup`、`insert`）。需要 `pip install -e .[tubes]` 并设置 `NUMBA_DISABLE_JIT=1`，
+详见 [docs/tubes.zh-CN.md](docs/tubes.zh-CN.md)。
+
 ## 输入
 
 | 输入 | 形状 | 来源 |
@@ -136,6 +142,7 @@ mars/
   registry.py    build_router、save_router、load_router
   config.py      MARSConfig
   rltoken/       共享表示、参考动作专家、TD3、回放、路由执行与 CLI
+  tubes/         试管搬运 robosuite 工作台、脚本控制器与技能标签
 configs/mars.yaml
 configs/rltoken.yaml
 examples/train_synthetic.py

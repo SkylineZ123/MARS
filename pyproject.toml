@@ -16,6 +16,7 @@ mars-rltoken = "mars.rltoken.cli:main"
 
 [project.optional-dependencies]
 siglip2 = ["open_clip_torch>=2.32", "huggingface_hub"]
+tubes = ["robosuite>=1.4,<1.5", "mujoco", "scipy", "numba"]
 test = ["pytest>=7"]
 
 [project.urls]

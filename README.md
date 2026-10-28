@@ -142,6 +142,13 @@ Existing `routerlt` adapter and chunk specialist checkpoints are supported (supp
 config for older specialist checkpoints); the original pi05 causal-decoder and DSRL checkpoints
 use different formats. VLA/robot drivers and simulator environments are supplied separately.
 
+## Tube-transfer workcell
+
+`mars.tubes` is a robosuite 1.4 / MuJoCo Panda workcell (`tubes_v2`) in which three tubes are moved
+one by one from a fixed source rack into a randomised target rack, with a privileged scripted
+controller and ground-truth skill labels (`pickup`, `insert`). It needs `pip install -e .[tubes]` and
+`NUMBA_DISABLE_JIT=1`; see [docs/tubes.zh-CN.md](docs/tubes.zh-CN.md).
+
 ## Inputs
 
 | Input | Shape | Source |
@@ -185,6 +192,7 @@ mars/
   registry.py    build_router, save_router, load_router
   config.py      MARSConfig
   rltoken/       Shared adapter, TD3 specialists, replay windows, routed execution and CLI
+  tubes/         Tube-transfer robosuite workcell, scripted controller and skill labels
 configs/mars.yaml
 configs/rltoken.yaml
 examples/train_synthetic.py
