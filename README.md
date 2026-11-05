@@ -2,7 +2,7 @@
 
 [中文说明](README.zh-CN.md)
 
-MARS decides, at every control step, **which controller should act**: a frozen generalist
+At every control step, MARS decides **which controller should act**: a frozen generalist
 vision-language-action (VLA) policy or one of several atomic-skill specialists (for example
 *Pickup* and *Place*). Its input at each step is the shared RL Token (which carries the images and task language
 through the frozen VLA) and the normalized proprioception. It keeps a dense causal memory
