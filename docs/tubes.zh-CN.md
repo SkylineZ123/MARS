@@ -1,16 +1,6 @@
-# 试管转移长时序实验（tubes_v2）
+# 试管转移长时序实验
 
 这是独立的 robosuite 1.4 / MuJoCo Panda 工作台，用于 MARS 的长时序路由与 RL 专家实验。
-代码迁移自 RL-Token-Pi05-open 的 `routerlt/tubes`，物理与协议保持不变。
-
-任务参考 RoboDojo 的 `insert_tubes`。该任务原本在 Isaac Sim 中实现，成功判据为：插入深度 ≥ 4.5 cm、在孔内、竖直、夹爪张开，最后复位。
-本实现的不同之处：
-
-- 开局 3 支试管都插在一个固定的源试管架（橙色）里；
-- 机械臂从左到右依次取管，插入目标试管架（绿色）的对应孔位：左→左、中→中、右→右；
-- "左"指机器人的 +y 方向，也就是 LIBERO 策略图像中的左侧；
-- 只对目标试管架的位姿做小范围随机，执行过程中不写入任何物体坐标。
-
 RL 专家只负责"抓取试管"（π1）和"插入试管架"（π2）。接近、搬运和复位由冻结的 VLA 完成。
 
 ## 场景与协议
@@ -40,7 +30,6 @@ RL 专家只负责"抓取试管"（π1）和"插入试管架"（π2）。接近�
   - 同一场景连续 reset 得到的物理状态逐位相同。
 - **划分**：沿用装配的划分，train 0–9999、val 10000–10049、calibration 20000–20049、test 30000–30099。只有一条指令（order 0），没有留出顺序。
 
-阶段推进要求条件连续满足 5 步。每完成一个阶段奖励 1/7，整个任务成功再加 1：
 
 | # | 阶段 | 判据 | 负责者 / 标签 kind |
 |---|---|---|---|
@@ -48,7 +37,7 @@ RL 专家只负责"抓取试管"（π1）和"插入试管架"（π2）。接近�
 | 2/4/6 | `insert_k` | 管底低于目标架第 k 孔口 ≥ 4.5 cm；管体中心与孔中心的水平偏差 ≤ 孔内半宽 + 2 mm（默认 11 mm）；倾角 ≤ 15°；未被夹持；夹爪开度 ≥ 6.4 cm | π2 插入 / `insert` |
 | 7 | `home` | 末端距起始位姿 < 4 cm，且 3 支试管都在位 | VLA |
 
-上表按 `TubesEnv.seated` 的实际实现记录。几何成功判据的中心距离阈值与孔、管间的物理间隙是两个量；接触约束仍由 MuJoCo 执行。此前文档把该阈值写成 `clearance/2 + 2 mm`，与实现不符，此处仅修正文档。
+上表按 `TubesEnv.seated` 的实际实现记录。几何成功判据的中心距离阈值与孔、管间的物理间隙是两个量；接触约束仍由 MuJoCo 执行。
 
 **失败**：任意试管掉到桌下，或某支未被夹持的试管倾角 > 60° 且持续 40 步。超过 `max_steps = 1200` 步截断。
 指令为："Move the three test tubes from the orange rack to the green rack one by one from left to right, inserting each into the matching hole, then return to the start position."（36 个 token，低于 smolvla_libero 的 48 上限）
@@ -85,4 +74,7 @@ while True:
         break
 ```
 
-`env.snapshot()` / `env.restore_training_snapshot()` 保存和恢复完整物理与协议状态，仅用于训练入口课程。
+`env.snapshot()` / `env.restore_training_snapshot()` 保存和恢复数值状态向量、部分控制量与协议状态，仅用于训练入口课程。
+
+重复入口实验需先 `env.sim.reset()` 再恢复快照，以初始化未包含在 `MjSimState` 中的求解器内部状态；恢复函数还会把 OSC 目标重设到当前位姿。这是规范化的课程入口，不保证等同于原轨迹中尚在执行的控制器状态。新实验使用 `mars.experiments.overnight_data.restore_entry`，并在训练前用重复动作验证一致性。详见 [恢复检查](specialist_diagnosis_20261030.zh-CN.md)。
+重复性检查还需与真实轨迹的观测对齐检查分开：相同 qpos/qvel 向量经过 `sim.forward()` 或恢复后，派生末端观测仍可能改变。跨入口评估应同时检查原始观测、处理后状态、RL Token 与参考动作；仅验证状态向量不足以证明训练/部署入口等价。实际测量见 [后续结果](specialist_results_20261031.zh-CN.md)。
