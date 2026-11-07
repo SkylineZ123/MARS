@@ -4,9 +4,9 @@ import pytest
 import torch
 
 from mars import LEARNED_KINDS, MARSConfig, build_router, count_params, load_router, needs_text, save_router
-from mars.baselines import GRURouter, WindowedQueryRouter
+from mars.baselines import WindowedQueryRouter
 from mars.layers import window_indices, window_pad
-from mars.router import RecurrentRouter
+from mars.router import MARSRouter
 from mars.text import load_text_cache, text_spec
 
 Z, Q, K = 6, 8, 3
@@ -15,14 +15,14 @@ CLASSES = ["vla", "pickup", "place"]
 
 def make_model(kind="mars", **overrides):
     cfg = MARSConfig(use_q=True, q_dim=3, d_model=16, heads=4, ssm_layers=1, temporal_layers=1, window=4,
-                     window_stride=1, dropout=0., modality_dims=[4, 4, 4, 4], **overrides)
+                     window_stride=1, dropout=0., **overrides)
     model = build_router(kind, 16, 3, cfg, text_dim=12)
     if needs_text(kind, cfg):
         model.set_text_embeddings(torch.randn(3, 12))
     return model, cfg
 
 
-@pytest.mark.parametrize("kind", ["mars", "mars_gru", "mars_lstm", "mamba_query", "gru_query", "windowed_query", "single_frame"])
+@pytest.mark.parametrize("kind", ["mars", "mars_lstm", "windowed_query", "single_frame"])
 def test_text_queries_causal_step_and_roundtrip(kind, tmp_path):
     torch.manual_seed(3)
     model, cfg = make_model(kind)
@@ -51,7 +51,7 @@ def test_text_queries_causal_step_and_roundtrip(kind, tmp_path):
     assert model.text_emb.grad is None
 
 
-@pytest.mark.parametrize("overrides", [dict(fusion="concat"), dict(skill_query=False)])
+@pytest.mark.parametrize("overrides", [dict(skill_query=False)])
 def test_mars_variants_step_matches_sequence(overrides):
     torch.manual_seed(0)
     model, _ = make_model("mars", **overrides)
@@ -86,29 +86,6 @@ def _resave(model, path, kind, **ctor):
     return path
 
 
-def test_checkpoints_from_earlier_versions(tmp_path):
-    torch.manual_seed(0)
-    model, _ = make_model("multimodal_mars")
-    model.eval()
-    z, q = torch.randn(1, 7, 16), torch.randn(1, 7, 3)
-    expected = model.forward_seq(z, q)
-    # text-query checkpoints of the research code: old kind name, query source recorded in ctor
-    restored, _ = load_router(_resave(model, tmp_path / "text.pt", "fusion_mamba", query_mode="text"))
-    assert restored.kind == "multimodal_mars" and "query_mode" not in restored.ctor
-    torch.testing.assert_close(restored.forward_seq(z, q), expected)
-    # learned skill-ID queries are no longer part of MARS
-    for kind, mode in (("mars", "id"), ("mars", "text_id"), ("fusion_mamba", "id")):
-        with pytest.raises(ValueError, match="skill-ID"):
-            load_router(_resave(model, tmp_path / f"{kind}_{mode}.pt", kind, query_mode=mode))
-    model.ctor.pop("query_mode")
-    with pytest.raises(ValueError, match="skill-ID"):  # the earliest fusion checkpoints used ID queries
-        load_router(_resave(model, tmp_path / "earliest.pt", "fusion_mamba"))
-    # a direct-head checkpoint has no queries, whatever query source it recorded
-    head, _ = make_model("multimodal_mars", skill_query=False)
-    restored, _ = load_router(_resave(head, tmp_path / "head.pt", "fusion_mamba", query_mode="id"))
-    assert restored.kind == "multimodal_mars" and not restored.skill_query
-
-
 @pytest.mark.parametrize("kind", LEARNED_KINDS)
 def test_every_kind_roundtrips(kind, tmp_path):
     torch.manual_seed(0)
@@ -135,13 +112,11 @@ def test_text_cache_rejects_misaligned_metadata(tmp_path):
 
 def test_invalid_configuration():
     with pytest.raises(ValueError, match="text_dim"):
-        RecurrentRouter(16, 3, skill_query=True)
+        MARSRouter(16, 3, skill_query=True)
     with pytest.raises(ValueError, match="text_dim"):
         WindowedQueryRouter(16, 3, skill_query=True)
     with pytest.raises(ValueError, match="expected finite text embeddings"):
         make_model()[0].set_text_embeddings(torch.randn(2, 12))
-    with pytest.raises(ValueError, match="modality_dims"):
-        build_router("multimodal_mars", 16, 3, MARSConfig(modality_dims=[4, 4, 4]), text_dim=8)
     with pytest.raises(ValueError, match="unknown MARS config keys"):
         MARSConfig.from_dict({"router": {"query_mode": "id"}})
 
@@ -155,46 +130,18 @@ def test_shipped_config_builds_the_paper_router():
     assert count_params(model) == 1_021_953  # SigLIP2 ViT-B-16 text width 768, three candidates
 
 
-# ---------------------------------------------------------------- recurrent trunk without fusion
-def _recurrent(trunk, skill_query, seed=0):
-    torch.manual_seed(seed)
-    model = RecurrentRouter(Z, K, trunk=trunk, skill_query=skill_query, q_dim=Q, d_model=16, layers=2, d_state=4,
-                            window=4, stride=1, heads=2, dropout=0.0, text_dim=10)
-    model.set_text_embeddings(torch.randn(K, 10))
-    return model.eval()
-
-
-@pytest.mark.parametrize("trunk,sq", [("mamba", False), ("mamba", True), ("gru", True)])
-def test_recurrent_step_matches_sequence_and_is_causal(trunk, sq):
-    model = _recurrent(trunk, sq)
-    assert model.kind == {("mamba", False): "mamba_head", ("mamba", True): "mamba_query",
-                          ("gru", True): "gru_query"}[(trunk, sq)]
-    z, q = torch.randn(1, 19, Z), torch.randn(1, 19, Q)
-    seq = model.forward_seq(z, q)
-    probs = torch.softmax(seq[0], -1)
-    state = model.init_state()
-    for t in range(19):
-        p, state = model.step(z[0, t], state, q[0, t])
-        assert torch.allclose(p, probs[t], atol=1e-5), t
-    z2 = z.clone()
-    z2[0, 11:] += 3.0
-    out = model.forward_seq(z2, q)
-    assert torch.allclose(out[0, :11], seq[0, :11], atol=1e-5)
-    assert not torch.allclose(out[0, 11:], seq[0, 11:], atol=1e-3)
-
-
 # ---------------------------------------------------------------- comparison routers
 def _windowed(kind="windowed_query", q_dim=Q, window=4, stride=3, seed=0):
     torch.manual_seed(seed)
     model = WindowedQueryRouter(Z, K, window=window, stride=stride, q_dim=q_dim, d_model=16, heads=2,
-                                temporal_layers=2, query_layers=1, dropout=0.0, temporal=kind != "windowed_xattn",
-                                skill_query=kind != "windowed_tf", text_dim=10)
+                                temporal_layers=2, query_layers=1, dropout=0.0, temporal=True,
+                                skill_query=True, text_dim=10)
     if model.skill_query:
         model.set_text_embeddings(torch.randn(K, 10))
     return model.eval()
 
 
-@pytest.mark.parametrize("kind", ["windowed_tf", "windowed_xattn", "windowed_query"])
+@pytest.mark.parametrize("kind", ["windowed_query"])
 def test_windowed_router_is_causal_and_streams(kind):
     model = _windowed(kind)
     assert model.kind == kind
@@ -233,31 +180,6 @@ def test_queries_attend_over_several_history_tokens():
     assert torch.all(attn[0, 0, :, 2:] < 1e-6)  # t=0: only the current step is real
 
 
-def test_gru_router_step_matches_sequence():
-    torch.manual_seed(0)
-    model = GRURouter(Z, K, 8, 8, 0.0, q_dim=Q).eval()
-    z, q = torch.randn(1, 10, Z), torch.randn(1, 10, Q)
-    seq = torch.softmax(model.forward_seq(z, q)[0], -1)
-    state = model.init_state()
-    for t in range(10):
-        p, state = model.step(z[0, t], state, q[0, t])
-        assert torch.allclose(p, seq[t], atol=1e-5)
-
-
-def test_old_multimodal_payload_stays_explicit(tmp_path):
-    model, _ = make_model('multimodal_mars')
-    model.kind = 'mars'  # pre-migration checkpoint
-    path = tmp_path / 'old.pt'
-    save_router(path, model, CLASSES)
-    restored, _ = load_router(path)
-    assert restored.kind == 'multimodal_mars' and restored.needs_modalities
-    payload = torch.load(path, weights_only=False)
-    payload['input_format'] = 'rltoken_q'
-    torch.save(payload, path)
-    with pytest.raises(ValueError, match='input format'):
-        load_router(path)
-
-
 def test_single_frame_has_no_dependency_on_past():
     model, _ = make_model('single_frame')
     model.eval()
@@ -266,3 +188,42 @@ def test_single_frame_has_no_dependency_on_past():
     z[:, :-1] += 50
     q[:, :-1] -= 50
     torch.testing.assert_close(model.forward_seq(z, q)[:, -1], expected)
+
+
+@pytest.mark.parametrize("kind", ["mars", "mars_lstm", "windowed_query", "single_frame"])
+def test_direct_head_roundtrip_and_streaming(kind, tmp_path):
+    model, cfg = make_model(kind, skill_query=False)
+    assert not needs_text(kind, cfg)
+    model.eval()
+    z, q = torch.randn(1, 7, 16), torch.randn(1, 7, 3)
+    expected = model.forward_seq(z, q)
+    path = tmp_path / "head.pt"
+    save_router(path, model, CLASSES)
+    restored, _ = load_router(path)
+    torch.testing.assert_close(restored.forward_seq(z, q), expected)
+    state = restored.init_state()
+    for t in range(7):
+        probs, state = restored.step(z[0, t], state, q[0, t])
+        torch.testing.assert_close(probs, expected.softmax(-1)[0, t], atol=1e-6, rtol=1e-5)
+
+
+@pytest.mark.parametrize("kind", ["gru", "mars_gru", "multimodal_mars", "mamba_query",
+                                   "windowed_tf", "windowed_xattn", "mars_learned_queries"])
+def test_removed_kinds_rejected(kind, tmp_path):
+    with pytest.raises(ValueError):
+        build_router(kind, 16, 3, MARSConfig(), text_dim=8)
+    model, _ = make_model()
+    path = _resave(model, tmp_path / "removed.pt", kind)
+    with pytest.raises(ValueError):
+        load_router(path)
+
+
+def test_retained_checkpoint_query_metadata(tmp_path):
+    model, _ = make_model()
+    path = _resave(model, tmp_path / "old.pt", "mars", query_mode="text")
+    restored, _ = load_router(path)
+    for name, value in model.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[name], value)
+    path = _resave(model, path, "mars", query_mode="id")
+    with pytest.raises(ValueError, match="skill-ID"):
+        load_router(path)

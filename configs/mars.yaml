@@ -3,7 +3,6 @@
 router:
   type: mars
   z_dim: 960  # router reads only RL Token and normalized proprioception
-  fusion: attention
   skill_query: true
   use_q: true
   q_dim: 8

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+from numbers import Integral
 
 
 @dataclass
@@ -49,8 +50,11 @@ class SpecialistConfig:
     pad_mode: str = "ref"
     buffer_capacity: int = 300_000
     reward: str = "skill"
+    window_stride: int = 1  # replay start spacing within each skill interval
 
     def __post_init__(self):
+        if isinstance(self.window_stride, bool) or not isinstance(self.window_stride, Integral) or self.window_stride <= 0:
+            raise ValueError("window_stride must be a positive integer")
         for name in ("C", "policy_delay", "batch_size", "buffer_capacity", "alpha_span"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")

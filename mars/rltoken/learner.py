@@ -163,12 +163,17 @@ def load_specialist(path, cfg=None, device: str = "cpu", resume: bool = False) -
 
     resume=True restores optimizers, targets, update clock and saved Torch RNG.
     Replay data and its sampling RNG are restored separately by ReplayBuffer.load.
+    Saved configs without window_stride retain legacy stride-1 replay semantics.
     """
     state = torch.load(path, map_location="cpu", weights_only=False)
     learner_state = state["learner"] if "learner" in state else state
     if learner_state.get("kind") == "dsrl":
         raise ValueError("expected an RL Token chunk specialist, got a DSRL noise-space checkpoint")
     saved_config = state.get("config")
+    if saved_config is not None:
+        # Checkpoints predating configurable replay starts used stride 1.
+        saved_config = dict(saved_config)
+        saved_config.setdefault("window_stride", 1)
     if cfg is None:
         if saved_config is None:
             raise ValueError("pass cfg for a routerlt checkpoint without embedded config")

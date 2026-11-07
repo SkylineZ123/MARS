@@ -1,16 +1,4 @@
-"""Comparison routers with the same per-step interface as MARS.
-
-GRURouter            h_t = GRU(P([z_t, q_t]), h_{t-1}), p_t = softmax(H(h_t)); hidden reset per episode
-WindowedQueryRouter  a causal window of L samples t - k*stride (k = 0..L-1) instead of a dense memory:
-                       windowed_tf     tokens -> time-causal Transformer -> current-step pool -> linear head
-                       windowed_xattn  tokens -> candidate queries cross-attend -> shared score MLP
-                       windowed_query  tokens -> time-causal Transformer -> candidate queries -> score MLP
-
-Window samples before the episode start are clamped and flagged as padding. Every sample gives a
-compact-state token (z) and, optionally, a proprioception token (q). Candidate queries come from the
-frozen candidate texts, as in MARS.
-"""
-
+"""Current-state MLP and causal window comparison routers."""
 from __future__ import annotations
 
 from collections import deque
@@ -22,57 +10,16 @@ from .layers import QueryBlock, SelfBlock, window_indices, window_pad
 from .router import check_text_queries, init_text_queries, store_text_embeddings
 
 
-def _join(z: Tensor, q: Tensor | None, q_dim: int) -> Tensor:
-    if not q_dim:
-        return z
-    if q is None:
-        raise ValueError("this router was built with proprio input; pass q")
-    return torch.cat([z, q], dim=-1)
-
-
-class GRURouter(nn.Module):
-    kind = "gru"
-
-    def __init__(self, z_dim: int, num_classes: int, proj_dim: int = 256, hidden: int = 256, dropout: float = 0.1,
-                 q_dim: int = 0):
-        super().__init__()
-        self.ctor = dict(z_dim=z_dim, num_classes=num_classes, proj_dim=proj_dim, hidden=hidden, dropout=dropout,
-                         q_dim=q_dim)
-        self.z_dim, self.q_dim, self.num_classes = z_dim, q_dim, num_classes
-        self.proj = nn.Sequential(nn.Linear(z_dim + q_dim, proj_dim), nn.LayerNorm(proj_dim), nn.GELU(),
-                                  nn.Dropout(dropout))
-        self.gru = nn.GRU(proj_dim, hidden, batch_first=True)
-        self.head = nn.Linear(hidden, num_classes)
-
-    def forward_seq(self, z: Tensor, q: Tensor | None = None) -> Tensor:
-        """z (B, T, z_dim) -> logits (B, T, K); each sequence starts from a zero hidden state."""
-        out, _ = self.gru(self.proj(_join(z, q, self.q_dim)))
-        return self.head(out)
-
-    def init_state(self, device=None) -> Tensor:
-        return torch.zeros(1, 1, self.gru.hidden_size, device=device)
-
-    @torch.no_grad()
-    def step(self, z_t: Tensor, h: Tensor, q_t: Tensor | None = None) -> tuple[Tensor, Tensor]:
-        x = _join(z_t.reshape(-1), None if q_t is None else q_t.reshape(-1), self.q_dim)
-        out, h = self.gru(self.proj(x.reshape(1, 1, -1)), h)
-        return torch.softmax(self.head(out[0, -1]), dim=-1), h
-
-
 class WindowedQueryRouter(nn.Module):
-    """Causal-window router with an optional temporal encoder and optional candidate queries.
-
-    kind follows the switches: temporal only -> "windowed_tf", queries only -> "windowed_xattn",
-    both -> "windowed_query".
-    """
+    """Causal-window temporal encoder with candidate queries or a direct head."""
 
     def __init__(self, z_dim: int, num_classes: int, window: int = 6, stride: int = 10, q_dim: int = 8,
                  d_model: int = 128, heads: int = 4, temporal_layers: int = 2, query_layers: int = 1,
                  ff_mult: int = 4, dropout: float = 0.1, temporal: bool = True, skill_query: bool = True,
                  text_dim: int = 0, state_fusion: str = "tokens"):
         super().__init__()
-        if not (temporal or skill_query):
-            raise ValueError("WindowedQueryRouter needs a temporal encoder, candidate queries, or both")
+        if not temporal:
+            raise ValueError("windowed_query requires a temporal encoder")
         check_text_queries(skill_query, text_dim)
         self.ctor = dict(z_dim=z_dim, num_classes=num_classes, window=window, stride=stride, q_dim=q_dim,
                          d_model=d_model, heads=heads, temporal_layers=temporal_layers, query_layers=query_layers,
@@ -81,7 +28,7 @@ class WindowedQueryRouter(nn.Module):
         self.z_dim, self.q_dim, self.num_classes = z_dim, q_dim, num_classes
         self.window, self.stride = window, stride
         self.temporal, self.skill_query = temporal, skill_query
-        self.kind = "windowed_query" if temporal and skill_query else ("windowed_tf" if temporal else "windowed_xattn")
+        self.kind = "windowed_query"
         self.state_fusion = state_fusion
         self.n_mod = 2 if q_dim and state_fusion == "tokens" else 1
         d = d_model
@@ -176,3 +123,36 @@ class WindowedQueryRouter(nn.Module):
         pad = torch.tensor([[n - 1 - k * self.stride < 0 for k in range(self.window)]], device=picks[0].device)
         logits = self.forward_windows(torch.stack(picks)[None], pad)
         return torch.softmax(logits[0], dim=-1), history
+
+
+class MLPRouter(nn.Module):
+    """Current z/q, the shared 128-wide projections, then a two-layer MLP."""
+    kind = "mlp"
+    needs_modalities = False
+
+    def __init__(self, z_dim, num_classes, q_dim=8, d_model=128, dropout=.1):
+        super().__init__()
+        self.ctor = dict(z_dim=z_dim, num_classes=num_classes, q_dim=q_dim,
+                         d_model=d_model, dropout=dropout)
+        self.z_dim, self.q_dim, self.num_classes = z_dim, q_dim, num_classes
+        self.z_in = nn.Sequential(nn.Linear(z_dim, d_model), nn.LayerNorm(d_model))
+        self.q_in = nn.Sequential(nn.Linear(q_dim, d_model), nn.GELU(), nn.Linear(d_model, d_model),
+                                  nn.LayerNorm(d_model)) if q_dim else None
+        self.head = nn.Sequential(nn.Linear(d_model, d_model), nn.GELU(), nn.Dropout(dropout),
+                                  nn.Linear(d_model, d_model), nn.GELU(), nn.Dropout(dropout),
+                                  nn.Linear(d_model, num_classes))
+
+    def forward_seq(self, z, q=None):
+        x = self.z_in(z)
+        if self.q_dim:
+            if q is None:
+                raise ValueError("MLP requires proprioception")
+            x = x + self.q_in(q)
+        return self.head(x)
+
+    def init_state(self, device=None):
+        return None
+
+    @torch.no_grad()
+    def step(self, z_t, state, q_t=None):
+        return self.forward_seq(z_t, q_t).softmax(-1), None

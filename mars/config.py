@@ -21,12 +21,9 @@ SECTIONS = ("router", "text", "train", "switch")
 
 @dataclass
 class MARSConfig:
-    # ---- router (mars | mars_gru | mars_lstm; ablations: mamba_head | mamba_query | gru_query | gru |
-    #      windowed_query | windowed_tf | windowed_xattn)
+    # ---- router: mars | mars_lstm | mlp | windowed_query | single_frame
     z_dim: int = 960  # shared RL Token, paper input
     type: str = "mars"
-    modality_dims: list[int] = field(default_factory=list)  # [z, image, image2, language] sizes
-    fusion: str = "attention"  # attention | concat
     skill_query: bool = True  # False: direct linear head instead of candidate text queries (ablation)
     use_q: bool = True  # read normalized proprioception q_t next to the packed observation
     q_dim: int = 8
@@ -40,8 +37,6 @@ class MARSConfig:
     temporal_layers: int = 2  # windowed router
     query_layers: int = 2
     ff_mult: int = 4
-    proj_dim: int = 256  # GRU router
-    hidden: int = 256  # GRU router
     # ---- candidate texts (frozen SigLIP2, encoded once before training)
     text_model: str = "ViT-B-16-SigLIP2"
     text_pretrained: str = "webli"
@@ -54,12 +49,18 @@ class MARSConfig:
     optimizer: str = "adamw"  # adam | adamw
     weight_decay: float = 1e-4
     select_best: bool = True  # keep the epoch with the best validation `selection_metric`
-    selection_metric: str = "macro_f1"  # macro_f1 | expert_f1 (false-entry tie break) | balanced_accuracy
+    selection_metric: str = "macro_f1"  # all candidates, including absent classes
     seed: int = 0
     # ---- skill switching (switch.py)
     switch_tau: float = 0.6
     switch_k: int = 2
     switch_cooldown: int = 0
+
+    def __post_init__(self):
+        if self.type not in ("mars", "mars_lstm", "mlp", "windowed_query", "single_frame"):
+            raise ValueError(f"unsupported router type {self.type!r}")
+        if self.selection_metric != "macro_f1":
+            raise ValueError("selection_metric must be macro_f1")
 
     @classmethod
     def from_dict(cls, data: dict) -> "MARSConfig":

@@ -35,13 +35,11 @@ class SkillSwitcher:
         self.cand = -1  # controller currently accumulating triggers
         self.count = 0  # consecutive triggers of `cand`
         self.cooling = 0  # queries left in the post-switch cooldown
-        self.switches = 0
 
     def _switch(self, controller: int) -> bool:
         self.active = controller
         self.cand, self.count = -1, 0
         self.cooling = self.cooldown
-        self.switches += 1
         return True
 
     def update(self, c_hat: int, probs=None) -> bool:

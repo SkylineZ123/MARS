@@ -1,80 +1,76 @@
-# 试管转移长时序实验
+# 试管搬运仿真
 
-这是独立的 robosuite 1.4 / MuJoCo Panda 工作台，用于 MARS 的长时序路由与 RL 专家实验。
-RL 专家只负责"抓取试管"（π1）和"插入试管架"（π2）。接近、搬运和复位由冻结的 VLA 完成。
+安装和下载权重见[中文 README](../README.zh-CN.md)，训练数据接口见
+[RL Token 指南](rltoken.zh-CN.md)，图形依赖见[环境说明](../environment/SIMULATION.md)。
 
-## 场景与协议
-
-场景布局、相机、控制器、观测格式和机器人起始姿态尽量对齐 LIBERO，以便从 `HuggingFaceVLA/smolvla_libero` 微调：
-
-- **场景与控制**：
-  - 桌面高 0.90 m，尺寸 1.0 × 1.2 m；机器人基座在 (-0.66, 0, 0)；
-  - agentview 使用 LIBERO 桌面场景的相机位姿；
-  - 控制器为 robosuite 默认 OSC_POSE（kp 150，单步输出上限 5 cm / 0.5 rad），控制频率 20 Hz；
-  - 起始关节角为 LIBERO MountedPanda 的初始值，其中第 7 关节转了 90°，使手指沿 x 方向开合。这样张开的手指不会碰到相邻孔里的试管。
-- **观测**：`_obs()` 返回与 lerobot `LiberoEnv(obs_type="pixels_agent_pos")` 完全相同的原始结构：
-  - 图像为 robosuite 的原始帧；
-  - `robot_state` 包含 eef 的 pos/quat/mat、夹爪的 qpos/qvel、关节的 pos/vel。
-  - 图像 180° 旋转和四元数→轴角由 lerobot 的 `LiberoProcessorStep` 完成；本仓库不包含该预处理。
-- **试管**：胶囊体管身（r = 8 mm，圆底帮助入孔对中）加管帽（r = 9.5 mm），总长 110 mm；condim = 4，防止被夹住后转动。
-- **两个试管架**：型号相同，3 个孔，间距 45 mm，方孔内宽 = 16 mm + `clearance`（默认 2 mm）。
-  - 底板支撑试管，插到底时插入深度约 5.2 cm；管帽高出顶板约 5.8 cm。
-  - 源架（橙色）固定在机器人右侧，中心 (-0.04, -0.17)；开局第 k 支试管在源架第 k 个孔中。
-  - 目标架（绿色）的名义中心为 (-0.04, 0.13)。
-  - 第 1 支（最左）取出后直接移向更左侧的目标架，后续试管都不会从已插好或未取出的试管上方经过。
-- **随机化**：
-  - 目标架 xy 各 ±4 cm、yaw ±15°；
-  - 关节初值带种子的高斯噪声，σ = 0.02 rad；
-  - 源架固定不动；
-  - 种子为 `physical_seed(scene, seed)`，与执行顺序无关；
-  - 同一场景连续 reset 得到的物理状态逐位相同。
-- **划分**：沿用装配的划分，train 0–9999、val 10000–10049、calibration 20000–20049、test 30000–30099。只有一条指令（order 0），没有留出顺序。
-
-
-| # | 阶段 | 判据 | 负责者 / 标签 kind |
-|---|---|---|---|
-| 1/3/5 | `grasp_k` | 双指夹住第 k 支试管（从左数），且管底高出源架顶板 ≥ 1.5 cm | π1 抓取 / `pickup` |
-| 2/4/6 | `insert_k` | 管底低于目标架第 k 孔口 ≥ 4.5 cm；管体中心与孔中心的水平偏差 ≤ 孔内半宽 + 2 mm（默认 11 mm）；倾角 ≤ 15°；未被夹持；夹爪开度 ≥ 6.4 cm | π2 插入 / `insert` |
-| 7 | `home` | 末端距起始位姿 < 4 cm，且 3 支试管都在位 | VLA |
-
-上表按 `TubesEnv.seated` 的实际实现记录。几何成功判据的中心距离阈值与孔、管间的物理间隙是两个量；接触约束仍由 MuJoCo 执行。
-
-**失败**：任意试管掉到桌下，或某支未被夹持的试管倾角 > 60° 且持续 40 步。超过 `max_steps = 1200` 步截断。
-指令为："Move the three test tubes from the orange rack to the green rack one by one from left to right, inserting each into the matching hole, then return to the start position."（36 个 token，低于 smolvla_libero 的 48 上限）
-
-**路由标签**（`TubesEnv.make_labeler`，用于 oracle 路由、专家训练窗口和路由器监督）：
-- `pickup`：末端进入管帽抓取点 6 cm 以内，离开半径为 8 cm（滞回）；
-- `insert`：试管进入目标孔水平 5 cm 以内，离开半径为 7 cm；
-- 持管但离孔较远时为 `transport`，其余为 `approach`，都归 VLA；
-- `SKILL_KINDS = {grasp: pickup, insert: insert}`。
-
-## 代码与运行
-
-- `mars/tubes/protocol.py`：`TubesSpec`、数据划分、`physical_seed`、`source_fingerprint`，纯 Python；
-- `mars/tubes/environment.py`：`TubesEnv`、`TubesEnvPool`、`make_workcell`；
-- `mars/tubes/scripted.py`：特权脚本示教控制器 `ScriptedTubes`（只用于训练 / 验收）；
-- `mars/tubes/privileged.py`：`PrivilegedState`、`ObjectInfo`、`PhaseLabel`。
+## 运行入口
 
 ```bash
-pip install -e .[tubes]
-export NUMBA_DISABLE_JIT=1   # 必须在导入 robosuite 之前设置；TubesEnv 在 JIT 模式下会直接报错
-MUJOCO_GL=egl pytest tests/test_tubes.py tests/test_tubes_protocol.py
+export NUMBA_DISABLE_JIT=1
+export MUJOCO_GL=egl
+mars-assets verify --assets assets/tubes
+mars-tubes run --assets assets/tubes --seed 0 --output outputs/tubes/run.json
 ```
 
-```python
-from mars.tubes.environment import TubesEnv
-from mars.tubes.scripted import ScriptedTubes
+预训练权重发布在 [XDEDM7/MARS](https://huggingface.co/XDEDM7/MARS)，包含一套
+匹配的模型：`mars/mars.pt`、`actors/pickup.pt`、`actors/insert.pt`，以及 VLA
+和共享适配器。只提供模型 seed 0。
 
-env = TubesEnv(render=False)
-env.reset(10000)
-teacher = ScriptedTubes(env)
-while True:
-    _, success, info = env.step(teacher.act())
-    if info["terminated"] or info["truncated"]:
-        break
+资源根目录包含 `manifest.json` 和 `simulation.yaml`；路径相对于资源根目录解析。
+默认使用资源包配置，也可用 `--config configs/tubes_simulation.yaml` 指定同布局配置。
+依赖在源码仓库维护，权重仓库不包含源码归档、依赖锁或历史实验记录。
+
+## 任务与物理协议
+
+`tubes_v2` 是基于 robosuite 1.4 / MuJoCo 的 Panda 工作台，默认设置为：
+
+| 项目 | 设置 |
+|---|---|
+| 任务 | 从左到右将三支试管移至目标架对应孔位，释放后返回起始位姿 |
+| 控制 | OSC_POSE，20 Hz，每回合最多 1200 控制步 |
+| 相机 | `agentview`、`robot0_eye_in_hand`，256 × 256 |
+| 目标架随机化 | xy 各 ±4 cm，yaw ±15° |
+| 初始关节噪声 | 高斯噪声，标准差 0.02 rad |
+| 默认孔间隙 | 2 mm |
+
+`TubesSpec` 定义协议及其 fingerprint。阶段为 `(grasp, insert)` 重复三次，
+最后为 `home`；对应的专家类别为 `pickup` 和 `insert`。
+只有一种搬运顺序，没有 held-out order。
+
+| 划分 | 场景 ID |
+|---|---|
+| train | 0–9999 |
+| val | 10000–10049 |
+| calibration | 20000–20049 |
+| test | 30000–30099 |
+
+`reset(init_id, seed)` 决定物理随机化；VLA 去噪噪声由回合和控制步编号生成。
+路由器接收 VLA 特征与归一化本体状态，不读取真值阶段。脚本控制器和标签器
+使用仿真真值，仅用于辅助检查与数据生成。
+
+## 可选评测
+
+```bash
+mars-tubes evaluate --assets assets/tubes --model-seeds 0 --modes mars \
+  --output outputs/tubes/evaluation.json
 ```
 
-`env.snapshot()` / `env.restore_training_snapshot()` 保存和恢复数值状态向量、部分控制量与协议状态，仅用于训练入口课程。
+默认测试网格为场景 30050–30099、噪声 seed 0/1，共 100 回合。
+模型种子默认根据资源配置选择；显式指定未提供的模型种子会在加载前报错。
+`--modes base base_c5 mars` 可比较执行 10 步和 5 步动作块的 VLA 与 MARS。
+MARS 的 VLA 执行长度为 10，专家动作块长度为 5；比较时应保持测试网格一致。
 
-重复入口实验需先 `env.sim.reset()` 再恢复快照，以初始化未包含在 `MjSimState` 中的求解器内部状态；恢复函数还会把 OSC 目标重设到当前位姿。这是规范化的课程入口，不保证等同于原轨迹中尚在执行的控制器状态。新实验使用 `mars.experiments.overnight_data.restore_entry`，并在训练前用重复动作验证一致性。详见 [恢复检查](specialist_diagnosis_20261030.zh-CN.md)。
-重复性检查还需与真实轨迹的观测对齐检查分开：相同 qpos/qvel 向量经过 `sim.forward()` 或恢复后，派生末端观测仍可能改变。跨入口评估应同时检查原始观测、处理后状态、RL Token 与参考动作；仅验证状态向量不足以证明训练/部署入口等价。实际测量见 [后续结果](specialist_results_20261031.zh-CN.md)。
+输出包含 SR、SCR，以及所有回合和仅成功回合的平均控制步数及对应样本量。
+SR 要求完成完整任务；SCR 按协议确认的插入释放事件去重，除以试管总数。
+无成功回合时，仅成功回合的步数均值为 null。
+`success_rate` 和 `scr` 使用 0–1 比例；控制步数不是墙钟耗时。
+固定轨迹 Macro-F1 通过路由评价接口计算，不是闭环 CLI 的输出。
+
+## 快照与模型资源
+
+完整任务应从 `reset` 启动。`snapshot()` / `restore_training_snapshot()`
+用于训练入口课程，只恢复部分物理与协议状态，并重设控制器目标；
+它们不是完整仿真检查点，不保证任意历史下的逐步精确续跑。
+
+四个 STL 及尺寸说明见[模型资源](../mars/tubes/assets/README.md)。单位为毫米，
+导入米制场景时缩放 `0.001`；自带仿真直接使用程序生成的几何体。

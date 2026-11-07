@@ -1,0 +1,7 @@
+SmolVLA base.py, graphs.py and smolvla.py were migrated from
+RL-Token-Pi05-open/routerlt/backbone; tubes/noise.py from routerlt/runtime.
+Source: https://github.com/Zhengsw03/RL-Token-Pi05-open
+Adapted from the routerlt backbone and runtime interfaces.
+Copyright 2026 The RL-Token-Pi05 authors. All rights reserved.
+Apache-2.0 terms apply; see bundled UPSTREAM_LICENSE.
+Numerical implementation retained; MARS integration by the MARS authors.

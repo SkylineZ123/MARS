@@ -1,0 +1,20 @@
+# All paths resolve against the downloaded release root.
+format: mars-tubes-simulation-v1
+backbone:
+  type: smolvla
+  pretrained_path: vla
+  c_vla: 10
+  cuda_graphs: true
+  max_graphs: 2
+  observation_format: libero
+adapter: adapter/adapter.pt
+seeds:
+  0: {router: mars/mars.pt, pickup: actors/pickup.pt, insert: actors/insert.pt}
+switch: {tau: 0.6, k: 2, cooldown: 0}
+query_interval: 1
+max_steps: 1200
+evaluation:
+  scenes: [30050, 30100]  # end-exclusive
+  noise_seeds: [0, 1]
+  model_seeds: [0]
+  modes: [base, base_c5, mars]

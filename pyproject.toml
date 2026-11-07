@@ -8,15 +8,19 @@ version = "0.3.0"
 description = "MARS routing with shared RL Token representations and reinforcement-learning specialists"
 readme = "README.md"
 license = { text = "Apache-2.0" }
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = ["torch>=2.1", "numpy>=1.24", "pyyaml>=6.0"]
 
 [project.scripts]
 mars-rltoken = "mars.rltoken.cli:main"
+mars-assets = "mars.tubes.assets_cli:main"
+mars-tubes = "mars.tubes.cli:main"
 
 [project.optional-dependencies]
-siglip2 = ["open_clip_torch>=2.32", "huggingface_hub"]
-tubes = ["robosuite>=1.4,<1.5", "mujoco", "scipy", "numba"]
+siglip2 = ["open_clip_torch>=2.32", "huggingface_hub", "transformers[sentencepiece]>=4.38"]
+# LeRobot 0.6.x requires Python >=3.12; install only for the SmolVLA backend.
+smolvla = ["lerobot[smolvla]>=0.6.2,<0.7"]
+tubes = ["robosuite>=1.4,<1.5", "mujoco>=2.3", "scipy>=1.2.3", "numba>=0.49.1"]
 test = ["pytest>=7"]
 
 [project.urls]
@@ -24,6 +28,7 @@ Repository = "https://github.com/SkylineZ123/MARS"
 
 [tool.setuptools.packages.find]
 include = ["mars*"]
+exclude = ["mars.experiments", "mars.experiments.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -31,3 +36,4 @@ pythonpath = ["."]
 
 [tool.setuptools.package-data]
 "mars.tubes" = ["assets/*.stl", "assets/README.md"]
+"mars.backbones" = ["NOTICE", "UPSTREAM_LICENSE"]

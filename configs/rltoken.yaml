@@ -14,8 +14,12 @@ adapter_train:
   weight_decay: 1.0e-5
   warmup_steps: 200
   stats_frames: 2048
+# Legacy reusable training recipe, not the paper C=5 / replay-stride=2 protocol.
+# Replay windows start at every owned step; rltoken_paper.yaml selects C=5/stride=2.
+# Pretrained checkpoints retain their saved C; this recipe does not redefine them.
 specialist:
   C: 10
+  window_stride: 1
   actor_hidden: [256, 256]
   critic_hidden: [256, 256]
   sigma: 0.1

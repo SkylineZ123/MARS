@@ -14,9 +14,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .metrics import selector_report
-
-IGNORE = -100
+from .metrics import IGNORE, selector_report
 
 
 def class_weights(labels: list[np.ndarray], num_classes: int) -> torch.Tensor:
@@ -69,14 +67,14 @@ def _optimizer(model, cfg):
 
 def train_router(model, train_seqs, val_seqs, cfg, device="cpu", seed: int = 0, log=print) -> dict:
     """cfg: MARSConfig (epochs, lr, batch_episodes, optimizer, weight_decay, select_best,
-    selection_metric). With select_best the epoch with the best validation metric is restored."""
+    selection_metric). With select_best the best validation macro-F1 epoch is restored."""
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     num_classes = model.num_classes
     weights = class_weights([s[1] for s in train_seqs], num_classes).to(device)
     opt = _optimizer(model, cfg)
     select_best = bool(getattr(cfg, "select_best", False)) and bool(val_seqs)
-    best = {"score": (-1.0, -float("inf")), "epoch": 0, "state": None}
+    best = {"score": -1.0, "epoch": 0, "state": None}
     history = []
     for epoch in range(cfg.epochs):
         model.train()
@@ -85,6 +83,8 @@ def train_router(model, train_seqs, val_seqs, cfg, device="cpu", seed: int = 0, 
         for i in range(0, len(order), cfg.batch_episodes):
             batch = [train_seqs[j] for j in order[i: i + cfg.batch_episodes]]
             z, y, q = _pad_batch(batch, device)
+            if not (y != IGNORE).any():
+                continue
             logits = _forward(model, z, q)
             loss = F.cross_entropy(logits.reshape(-1, num_classes), y.reshape(-1), weight=weights,
                                    ignore_index=IGNORE)
@@ -93,19 +93,12 @@ def train_router(model, train_seqs, val_seqs, cfg, device="cpu", seed: int = 0, 
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             losses.append(loss.item())
-        entry = {"epoch": epoch + 1, "train_loss": float(np.mean(losses))}
+        entry = {"epoch": epoch + 1, "train_loss": float(np.mean(losses)) if losses else 0.0}
         if val_seqs:
             preds = predict(model, val_seqs, device, batch_episodes=cfg.batch_episodes)
             rep = selector_report(preds, [s[1] for s in val_seqs], num_classes)
-            entry.update({"val_accuracy": rep["accuracy"], "val_balanced_accuracy": rep["balanced_accuracy"],
-                          "val_macro_f1": rep["macro_f1"]})
-            for k in range(1, num_classes):
-                entry[f"val_iou_{k}"] = rep.get(f"iou_{k}_mean", float("nan"))
-            metric = getattr(cfg, "selection_metric", "macro_f1")
-            false_entries = float(np.mean([rep.get(f"false_entries_{k}_mean", 0.)
-                                           for k in range(1, num_classes)]))
-            score = (rep[metric], -false_entries if metric == "expert_f1" else 0.)
-            entry.update(val_expert_f1=rep["expert_f1"], val_false_entries=false_entries)
+            entry.update({f"val_{key}": value for key, value in rep.items()})
+            score = rep["macro_f1"]
             if select_best and score > best["score"]:
                 best = {"score": score, "epoch": epoch + 1, "state": copy.deepcopy(model.state_dict())}
         history.append(entry)

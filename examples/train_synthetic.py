@@ -57,11 +57,8 @@ def main():
     print(f"best epoch {result['best_epoch']}")
 
     probs = predict(model, val, "cpu", probs=True)
-    rep = selector_report([p.argmax(-1) for p in probs], [s[1] for s in val], len(CLASSES),
-                          switch_grid=[(cfg.switch_tau, cfg.switch_k)], probs=probs)
-    tag = f"switch_t{cfg.switch_tau:g}_k{cfg.switch_k}"
-    print(f"per-step macro-F1 {rep['macro_f1']:.3f}, deployed macro-F1 {rep[tag + '_macro_f1']:.3f}, "
-          f"switches/ep {rep['switches_mean']:.2f} -> {rep[tag + '_switches_mean']:.2f}")
+    rep = selector_report([p.argmax(-1) for p in probs], [s[1] for s in val], len(CLASSES))
+    print(f"macro-F1 {rep['macro_f1']:.3f}")
 
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "mars.pt"

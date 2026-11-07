@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from mars import MARSConfig, MARSController, build_router, pack_modalities
+from mars import MARSConfig, MARSController, build_router
 from mars.rltoken import (
     AdapterSpec, AdapterTrainConfig, IdentitySpecialist, PHASE_ONLINE, PrefixFeatures, RLTAdapter,
     ReplayBuffer, RoutedRLTPolicy, SpecialistConfig, SpecialistLearner, load_adapter,
@@ -80,7 +80,7 @@ def test_group_padding_keeps_modality_slots():
 
 def test_switch_immediately_discards_both_generalist_and_expert_queues():
     adapter = make_adapter().eval()
-    cfg = MARSConfig(modality_dims=[8, 4, 4, 4], q_dim=3, d_model=8, heads=2, ssm_layers=1,
+    cfg = MARSConfig(q_dim=3, d_model=8, heads=2, ssm_layers=1,
                      dropout=0, skill_query=False)
     router = build_router("mars", 8, 2, cfg)
     ctrl = MARSController(router, ["vla", "pickup"], tau=0.6, k=1)
@@ -111,7 +111,7 @@ def test_switch_immediately_discards_both_generalist_and_expert_queues():
     assert c.switched and c.active_name == "vla" and np.all(c.action == 3)
     policy.reset()
     assert ctrl.active == 0 and not policy.queue and policy.t == 0
-    assert pack_modalities(f, adapter.encode_features(f)).shape == (1, 20)
+    assert adapter.encode_features(f).shape == (1, 8)
 
 
 def test_resume_matches_uninterrupted_learner_and_replay(tmp_path):
@@ -191,7 +191,8 @@ def test_cli_adapter_specialist_resume(tmp_path):
     assert load_specialist(checkpoint, resume=True).n_updates == 3
 
 
-def test_episode_roundtrip_and_cli_window_builder(tmp_path):
+@pytest.mark.parametrize("window_stride", [1, 2])
+def test_episode_roundtrip_and_cli_window_builder(tmp_path, window_stride):
     log = EpisodeLog(meta={"end_reason": "budget"})
     log.exec_norm = [np.zeros(2, np.float32)] * 4
     log.skill_owner, log.source = [1] * 4, [0] * 4
@@ -205,10 +206,11 @@ def test_episode_roundtrip_and_cli_window_builder(tmp_path):
     again = load_episode(path)
     np.testing.assert_equal(again.z, log.z)
     cfg = tmp_path / "cfg.yaml"
-    cfg.write_text("specialist:\n  C: 2\n")
+    cfg.write_text(f"specialist:\n  C: 2\n  window_stride: {window_stride}\n")
     out = tmp_path / "windows.npz"
     main(["build-windows", "--episode", str(path), "--skill", "custom_skill", "--controller-id", "1",
           "--config", str(cfg), "--output", str(out)])
     with np.load(out) as data:
-        assert len(data["z"]) == 4
-        assert data["done"].tolist() == [0, 0, 1, 1]
+        assert data["step"].tolist() == list(range(0, 4, window_stride))
+        assert len(data["z"]) == len(range(0, 4, window_stride))
+        assert data["done"].tolist() == [0, 0, 1, 1][::window_stride]

@@ -16,7 +16,6 @@ def test_switch_needs_k_consecutive_triggers_above_tau():
     assert not s.update(VLA, p(0.5, 0.0, 0.5))  # below tau: streak broken
     assert not s.update(PLACE, p(0.2, 0.0, 0.8))
     assert s.update(PLACE, p(0.1, 0.0, 0.9)) and s.active == PLACE
-    assert s.switches == 1
 
 
 def test_exit_and_reentry_follow_the_same_rule():

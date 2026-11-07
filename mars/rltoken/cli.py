@@ -46,7 +46,7 @@ def main(argv=None):
         cfg = load_config(args.config, "specialist", SpecialistConfig)
         skill = args.skill if cfg.reward == "skill" else "task"
         data, stats = build_windows(load_episode(args.episode), args.controller_id, skill, cfg.C,
-                                   alignment=cfg.ref_alignment, pad_mode=cfg.pad_mode,
+                                   alignment=cfg.ref_alignment, pad_mode=cfg.pad_mode, stride=cfg.window_stride,
                                    handoff_gamma=cfg.gamma if cfg.reward == "handoff_task" else None)
         if not data:
             parser.error(f"episode contains no valid specialist windows: {stats}")

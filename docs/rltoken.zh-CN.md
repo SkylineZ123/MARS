@@ -1,180 +1,105 @@
-# MARS 中的 RL Token 与技能专家
+# RL Token：数据与组件接口
 
-MARS 现在包含共享表示训练、技能专家强化学习和路由执行。入口为 `mars.rltoken`，只依赖已有的
-Torch、NumPy 和 PyYAML。冻结 VLA 的加载、图像预处理、观测/动作归一化及环境交互由调用方提供。
-本模块可以接收 π0.5、SmolVLA 或其他 VLA 的冻结前缀特征；整个训练和执行过程必须使用同一个
-VLA、同一个 adapter 和同一套归一化统计。
+本指南说明保留的缓存数据训练工具与部署接口。
+预训练试管推理入口见[试管指南](tubes.zh-CN.md)；安装见[README](../README.zh-CN.md)。
+这些组件不构成论文全流程训练复现，也不承诺重现历史结果。
 
-## 来源与迁移范围
+## 配置与命令
 
-代码来源是 `RL-Token-Pi05-open` 的 `routerlt` 实现，与 MARS 现有多专家架构对应：
+`configs/rltoken.yaml` 是通用组件配置；`configs/rltoken_paper.yaml` 是面向
+论文动作窗口约定的预设（专家 `C=5`、窗口起点采样步长 `window_stride=2`）。
+兼容旧调用的默认 `window_stride=1`。采样步长控制训练窗口的起点间隔，
+不改变环境控制频率、路由查询频率或部署动作块长度。
+新增预设不会追溯改变历史训练、检查点或已记录结果。
 
-| 当前模块 | 原仓库来源 | 职责 |
-|---|---|---|
-| `adapter.py` | `routerlt/adapter/model.py` | 读出 RL Token，使用并行位置查询重建冻结特征 |
-| `train.py` | `routerlt/adapter/train.py` 的训练流程 | 缓存特征训练、标准化、验证集选优 |
-| `networks.py` | `routerlt/specialist/networks.py` | 参考动作条件化的完整动作块 Actor、双 Critic |
-| `losses.py`、`schedules.py` | 同名 `routerlt/specialist` 文件 | TD3 目标、参考约束、reference dropout、权重调度 |
-| `learner.py`、`replay.py` | 同名 `routerlt/specialist` 文件 | 延迟 Actor 更新、Polyak 目标、经验回放和恢复 |
-| `episode.py`、`windows.py` | `routerlt/runtime/episode_log.py`、`routerlt/specialist/windows.py` | 逐步记录、技能区间、重叠窗口、人工纠正 |
-| `features.py` | `routerlt/backbone/base.py` 的特征约定 | 与冻结 VLA 对接，不导入原工程 |
-| `controller.py`、`cli.py` | 本次新增 | 与 MARS 路由器连接、独立命令行入口 |
-
-上游 `routerlt` 的 Actor/Critic 和更新流程进一步来自
-`lerobot/src/lerobot/policies/pi05_rlt/modeling_pi05_rlt.py` 与
-`scripts/train_rlt_stage2_pi05.py`。这里使用 `routerlt` 的并行解码 adapter 和双隐藏层专家，
-与 π0.5 原版的因果教师强制解码器、头部配置不同。
-
-**检查点兼容性**：可直接读取 `routerlt` 的 `adapter.pt`；已有 chunk 专家检查点可用
-`load_specialist(path, cfg=对应的SpecialistConfig)` 读取。新检查点内含配置，可直接加载。
-π0.5 原版的 `best_checkpoint.pt`、DSRL 噪声空间专家不属于本模块格式。VLA/机器人驱动、
-LIBERO、几何标注器和仿真脚本仍由各自环境提供；这里没有复制这些环境依赖。
-
-## 安装与快速验证
+以下命令需要用户已准备好的缓存，不负责采集图像、运行 VLA 或生成标注：
 
 ```bash
-pip install -e ".[test]"
-pytest
-python -m examples.train_rltoken_synthetic
 python -m mars.rltoken --help
-```
-
-示例使用 CPU 合成观测，完成 adapter 训练、窗口构造、4 次 TD3 更新、路由器训练、检查点加载、
-12 步路由执行，只验证模块连接和数值有效性，不衡量任务成功率。
-
-## 1. 训练共享 RL Token
-
-冻结 VLA 的输出需要符合以下接口（也可直接传入原 `routerlt` 的 `PrefixFeatures`）：
-
-```python
-from mars.rltoken import PrefixFeatures, token_groups
-
-features = PrefixFeatures(
-    hidden=hidden,               # (B, N, d_vla)，冻结 VLA 输出
-    slices={"image": image_slice, "image2": image2_slice, "lang": language_slice},
-    group_masks={"image": image_mask, "image2": image2_mask, "lang": language_mask},
-)
-tokens, mask = token_groups(features, ["image", "image2", "lang"], group_sizes)
-```
-
-`group_sizes` 是每组的固定槽位数，训练与部署一致。函数将不足的组填充并屏蔽，超长组报错。
-语言截断需在 VLA 提取阶段显式完成。`mask=True` 表示有效 token。
-
-将多个 batch 合并为训练缓存，保存组元数据：
-
-```python
-import numpy as np
-
-np.savez("tokens.npz", tokens=tokens.cpu().numpy(), mask=mask.cpu().numpy(),
-         token_groups=np.array(["image", "image2", "lang"]), group_sizes=np.array(group_sizes))
-```
-
-```bash
-python -m mars.rltoken train-adapter \
-  --data tokens_train.npz --val-data tokens_val.npz \
+python -m mars.rltoken train-adapter --data tokens.npz \
   --config configs/rltoken.yaml --output outputs/adapter --device cuda
+python -m mars.rltoken build-windows --episode episode.pt \
+  --controller-id 1 --skill pickup --config configs/rltoken_paper.yaml \
+  --output outputs/pickup_windows.npz
+python -m mars.rltoken train-specialist --data outputs/pickup_windows.npz \
+  --config configs/rltoken_paper.yaml --output outputs/pickup.pt \
+  --updates 5000 --device cuda
 ```
 
-产出 `adapter.pt` 和 `adapter_metrics.json`；提供验证集时选择验证损失最低的 epoch。
-缓存格式为 `tokens (N, slots, d_vla)`、`mask (N, slots)`、`token_groups`、`group_sizes`。
-默认 `d_in`、`n_slots` 从缓存推断，`d_model=960` 与当前 MARS 配置匹配。
-使用其他 VLA 时同时修改 `configs/rltoken.yaml` 和 `configs/mars.yaml` 的特征维度。
-原 π0.5 的 mmap 缓存不由此 CLI 直接读取；可在 Python API 中传入已读取的 token/mask，
-并明确声明其 token 组。图像专用缓存不应被标成包含语言的缓存。
-
-## 2. 从 rollout 构造专家训练数据
-
-`EpisodeLog` 区分两类索引：T 个动作对应 T 条执行记录，T+1 个观测对应 T+1 个 `z/q`。
-
-| 字段 | 内容 |
-|---|---|
-| `exec_norm` | T 个实际执行的归一化动作，包含人工纠正 |
-| `skill_owner` | 每个动作所属专家，0 为通用策略，与 MARS 候选索引一致 |
-| `source` | `SOURCE_VLA`、`SOURCE_RL` 或 `SOURCE_EXPERT` |
-| `skill_success_after` | `{技能名: T 个 bool}`，执行动作后的技能成功信号 |
-| `success_after` | T 个任务成功信号，供 task/handoff_task 奖励使用 |
-| `rewards` | 可选 T 个环境奖励；提供后优先于成功信号 |
-| `z`、`z_valid`、`q_norm` | T+1 个共享 RL Token、有效标志、归一化本体状态 |
-| `vla_t`、`vla_chunks` | 通用策略查询时间和完整归一化动作块，包括最后状态的参考来源 |
-| `meta["end_reason"]` | `budget` 表示时间截断，其余结束在区间边界作为终止 |
-
-```python
-from mars.rltoken import EpisodeLog, build_windows, save_episode
-
-log = EpisodeLog(meta={"end_reason": "budget"})
-# 按上表填充每步数据；采集期间保持列表，finalize 后即为只读训练记录。
-save_episode("rollout.pt", log)
-windows, stats = build_windows(log, k=1, skill="pickup", C=10)
-```
-
-CLI 提供相同转换：
+`--updates` 是本次追加的更新次数。恢复专家需要检查点及同名 `.replay.npz`：
 
 ```bash
-python -m mars.rltoken build-windows --episode rollout.pt --skill pickup \
-  --controller-id 1 --config configs/rltoken.yaml --output pickup_windows.npz
-```
-
-每个技能区间内，每一步产生一个长度不超过 C 的重叠窗口。成功或交接令 `done=1`；
-时间截断保留 bootstrap，下一观测必须有效。奖励按实际执行长度 L 使用 `gamma**L`
-引导下一状态价值。人工纠正的动作替换对应 reference 行；窗口不跨越目标或指令边界。
-`reward: handoff_task` 可在交接时使用后续任务成功的折扣信用。
-
-## 3. 训练与恢复技能专家
-
-```bash
-python -m mars.rltoken train-specialist --data pickup_windows.npz \
-  --config configs/rltoken.yaml --output outputs/pickup.pt --updates 5000 --device cuda
-
 python -m mars.rltoken train-specialist --resume outputs/pickup.pt \
-  --config configs/rltoken.yaml --output outputs/pickup.pt --updates 1000 --device cuda
+  --config configs/rltoken_paper.yaml --output outputs/pickup.pt \
+  --updates 1000 --device cuda
 ```
 
-输出包括 `pickup.pt`、`pickup.replay.npz` 和最后更新的 `pickup.metrics.json`。
-恢复时两个训练文件需配套存在；恢复 Actor/Critic、目标网络、优化器、更新计数和随机数状态。
-`--updates` 是本次增加的更新次数。新训练的窗口数据可以来自多个 episode 的拼接；
-Python API 可保留每条数据的采集阶段和 episode ID。
+恢复时不能同时传 `--data`；新增在线数据通过 Python API 加入回放。
+配置必须与数据、检查点的维度、动作长度和归一化一致。
 
-在线 RL 使用同一 learner，在环境采集之后追加新窗口，再执行更新：
+## 适配器缓存
 
-```python
-from mars.rltoken import PHASE_ONLINE, ReplayBuffer, SpecialistLearner, train_specialist
+`train-adapter` 用 `numpy.load(..., allow_pickle=False)` 读取 NPZ：
 
-learner = SpecialistLearner(z_dim, q_dim, action_dim, specialist_cfg, device="cuda")
-replay = ReplayBuffer(specialist_cfg.buffer_capacity, seed=0)
-# 每次采集后：
-replay.add_batch(windows, PHASE_ONLINE, episode_id=episode_id)
-train_specialist(learner, replay, updates=100, output="outputs/pickup.pt")
-```
+| 字段 | 形状与约束 |
+|---|---|
+| `tokens` | `(N, slots, d_vla)`，冻结 VLA 的前缀特征 |
+| `mask` | `(N, slots)`，有效 token 掩码 |
+| `token_groups` | 按顺序排列的组名，例如 `image`、`image2`、`lang` |
+| `group_sizes` | 各组固定槽位数，总和必须覆盖缓存 token 序列 |
 
-执行时 `learner.act(z, q, ref, explore=True, rng=rng)` 加入固定标准差探索噪声。
-Actor 输出完整动作块；reference 作为输入和训练约束。按原实现使用 Q1 优化 Actor、
-双目标 Critic 的最小值估计 TD 目标，延迟更新 Actor 并进行 Polyak 更新。
-离线缓存训练属于 warm-up；持续在线学习需要环境反馈和新的 rollout。
+`--val-data` 可指定独立验证缓存，组名及槽位数须与训练缓存相同。
+不要把缓存 token 的填充长度与图像分辨率或动作块长度混为一谈。
 
-## 4. 接入 MARS 执行
+在线 `features` 对象需提供 `hidden (B,N,d)`、`slices` 与 `group_masks`。
+`features.slices[group]` 标识该组 token 区间；掩码须匹配该区间的批次和长度。
+`RLTAdapter.encode_features` 按检查点组顺序提取、填充并编码。
+超出组槽位的输入会报错；语言截断应由上游特征提取显式完成。
 
-先按现有流程使用 `adapter.encode_features(features)` 生成路由训练特征，
-训练并保存 MARS。然后绑定每个候选专家：
+## EpisodeLog 与窗口
 
-```python
-from mars import MARSController
-from mars.rltoken import RoutedRLTPolicy, load_adapter, load_specialist
+使用 `mars.rltoken.episode` 的保存/加载接口管理 episode，避免手写不完整日志。
+EpisodeLog 由 `torch.save` 序列化（示例使用 `.pt`），不是窗口数据的 NPZ 格式。
+对于执行了 T 次动作的回合：
 
-ctrl = MARSController.from_checkpoint("mars.pt", device="cuda")
-adapter = load_adapter("outputs/adapter/adapter.pt", device="cuda")
-policy = RoutedRLTPolicy(
-    ctrl, adapter,
-    reference=reference_from_frozen_vla,  # (features, q) -> 归一化 (H, action_dim)
-    specialists={"pickup": load_specialist("outputs/pickup.pt", device="cuda"),
-                 "place": load_specialist("outputs/place.pt", device="cuda")},
-)
-policy.reset()  # 每集开始时清空路由记忆、切换器和动作队列
-result = policy.step(features, q_normalized)
-env.step(action_unnormalize(result.action))
-```
+- 动作索引长度 T：`exec_norm`、`exec_raw`、`owner`、`skill_owner`、`source`，
+  以及动作执行后的 `success_after`、`skill_success_after` 等记录。
+- 观测索引长度 T+1：`z`、`z_valid`、`q_norm`、阶段等；观测 t 对应动作 t 之前。
+- VLA 查询索引：`vla_t` 与 `vla_chunks` 保存查询时间和完整归一化参考块。
 
-`features` 在流式部署时 batch=1；`reference` 回调只在队列需要补充时调用，可复用当前 VLA 的 KV
-cache。MARS 按 `query_interval` 查询，即使队列仍有动作也会检查交接；一旦切换，旧队列立即清空，
-同一步调用新控制器。reference 的 H 必须至少为所选专家的 C。可用 `IdentitySpecialist(C)` 先验证
-整条调用链。所有 `z`、`q`、`ref`、`act` 均为训练时的归一化空间；动作反归一化和环境裁剪放在
-外部环境适配层。PT 文件使用 PyTorch 对象序列化，只加载可信来源的检查点。
+`owner` 是实际执行动作的控制器，`skill_owner` 是该步所属专家区间；
+专家演示纠正与 RL 自身执行通过 `source` 区分。
+试管数据应明确包含 `pickup` 与 `insert` 成功谓词，不沿用默认 `place` 名称。
+阶段、真值与仿真状态只用于数据构造和审计，不送入部署路由器。
+
+窗口 NPZ 的必要字段为：
+
+| 字段 | 批次维 N 后的形状 |
+|---|---|
+| `z`, `next_z` | `(d_z,)` |
+| `q`, `next_q` | `(d_q,)` |
+| `ref`, `act`, `next_ref` | `(C,d_a)` |
+| `rew`, `valid` | `(C,)` |
+| `done` | 标量 |
+
+窗口不跨越控制权区间；成功、交接与预算结束的终止/自举含义不同。
+`valid` 区分真实执行动作与补齐行；参考对齐、补齐及奖励模式由配置决定。
+`build_windows` 可构造重叠窗口，起点间隔由 `window_stride` 决定。
+改变它会改变有效训练样本集合，不能视为旧训练协议的等价替换。
+
+历史 `ref_alignment: executed` 会逐行拼接日志中当时生效的 VLA 参考动作，
+所以窗口后半段可能来自起点之后的查询；它并不保证整个参考块在窗口起点已经可知。
+部署专家接收的是当前观测生成的参考块，二者应在新训练实验中单独核对。
+本次保留历史对齐语义以兼容已有权重，新增 C=5/stride=2 预设未改变此约定。
+
+## 部署与归一化
+
+`RoutedRLTPolicy` 共享一个冻结适配器，接收路由器、VLA 参考动作回调与专家映射。
+VLA 参考块与专家输出均处于训练归一化动作空间；环境适配层负责反归一化。
+每个 episode 调用 `reset()`，切换控制器时清空旧动作队列。
+候选顺序必须与路由器检查点一致；试管发布使用 `vla,pickup,insert`。
+
+适配器、专家与路由器必须来自匹配的特征提取及归一化协议。
+部署加载器可丢弃适配器解码器，专家恢复训练则需要完整训练状态与配套回放；
+仅含 actor 的发布权重不应当作可恢复训练的检查点。
+旧检查点格式的支持以加载器校验为准，不推断其论文来源。

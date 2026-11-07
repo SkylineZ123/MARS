@@ -1,0 +1,2 @@
+# Install PyTorch from requirements-torch-cu126.txt first. Run at repository root.
+-e .[smolvla,siglip2,tubes,test]

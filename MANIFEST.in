@@ -1,0 +1,11 @@
+include README.md README.zh-CN.md LICENSE
+recursive-include environment *.yaml *.txt *.md
+recursive-include configs *.yaml
+recursive-include docs *.md *.json *.pdf
+recursive-include mars/tubes/assets *.stl README.md
+prune mars/experiments
+prune scripts
+prune outputs
+prune .idea
+prune .venv
+exclude uv.lock

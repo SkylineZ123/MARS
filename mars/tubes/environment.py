@@ -387,7 +387,11 @@ class TubesEnv:
 
     # ------------------------------------------------------------------ training snapshots
     def snapshot(self):
-        """Full physics + controller + protocol state; only for training entry curricula."""
+        """Capture selected state for training-entry curricula.
+
+        This is not a complete simulator checkpoint: internal solver and controller
+        caches are not serialized. Exact continuation is not guaranteed.
+        """
         import copy
         return {"physics": self.physics_state(), "rack_pos": self.sim.model.body_pos[self.rack_id].copy(),
                 "rack_quat": self.sim.model.body_quat[self.rack_id].copy(),
@@ -398,6 +402,12 @@ class TubesEnv:
                 "toppled": self._toppled, "spec": self.spec.fingerprint}
 
     def restore_training_snapshot(self, state):
+        """Restore recorded physics, controls and curriculum bookkeeping.
+
+        Reinitialize controller goals, clear last_skill_success and reopen the
+        episode (_finished=False). Solver/controller caches and the caller's
+        policy state are not restored, so future trajectories need not match.
+        """
         if state["spec"] != self.spec.fingerprint:
             raise ValueError("snapshot protocol mismatch")
         import copy

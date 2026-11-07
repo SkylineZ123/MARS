@@ -3,9 +3,8 @@ import pytest
 import torch
 
 from mars import MARSConfig, MARSController, build_router, predict, save_router, train_router
-from mars.baselines import GRURouter
-from mars.metrics import intervals_from_flags, selector_report
-from mars.router import RecurrentRouter
+from mars.metrics import selector_report
+from mars.router import MARSRouter
 from mars.switch import replay_switch
 from mars.train import class_weights
 
@@ -36,16 +35,8 @@ def _late_accuracy(model, val):
 
 def test_mamba_memory_reaches_an_early_cue():
     torch.manual_seed(0)
-    model = RecurrentRouter(4, 3, trunk="mamba", q_dim=0, d_model=16, layers=1, d_state=8, dropout=0.0)
+    model = MARSRouter(4, 3, skill_query=False, trunk="mamba", q_dim=0, d_model=16, layers=1, d_state=8, dropout=0.0)
     train_router(model, _cue_sequences(128), _cue_sequences(32, seed=1), TRAIN_CFG, log=lambda e: None)
-    assert _late_accuracy(model, _cue_sequences(32, seed=1)) > 0.95
-
-
-def test_gru_router_reaches_an_early_cue():
-    torch.manual_seed(0)
-    model = GRURouter(4, 3, proj_dim=16, hidden=16, dropout=0.0)
-    cfg = MARSConfig(epochs=40, lr=1e-2, batch_episodes=16, optimizer="adam", weight_decay=0.0)
-    train_router(model, _cue_sequences(128), _cue_sequences(32, seed=1), cfg, log=lambda e: None)
     assert _late_accuracy(model, _cue_sequences(32, seed=1)) > 0.95
 
 
@@ -54,23 +45,20 @@ def test_class_weights_inverse_frequency():
     assert w.tolist() == pytest.approx([4 / 9, 4 / 3, 0.0])
 
 
-def test_selector_report_intervals():
-    assert intervals_from_flags(np.array([0, 1, 1, 0, 1])) == [(1, 3), (4, 5)]
-    pred = [np.array([0, 0, 1, 1, 1, 0])]
-    label = [np.array([0, 1, 1, 1, 0, 0])]
-    probs = [np.eye(2)[pred[0]]]
-    rep = selector_report(pred, label, 2, switch_grid=[(0.5, 1), (0.5, 2)], probs=probs)
-    assert rep["iou_1_mean"] == pytest.approx(0.5)
-    assert rep["entry_lag_1_mean"] == 1 and rep["exit_lag_1_mean"] == 1
-    assert rep["switch_t0.5_k1_iou_1_mean"] == pytest.approx(0.5)  # k = 1 on one-hot scores: argmax
-    assert rep["switch_t0.5_k2_iou_1_mean"] == pytest.approx(0.2)  # owners [0,0,0,1,1,1]: one step late both ways
+def test_selector_report_masks_ignore_and_includes_absent_candidates():
+    rep = selector_report([np.array([0, 1, 2, 999])], [np.array([0, 1, 0, -100])], 4)
+    assert rep["macro_f1"] == pytest.approx((2 / 3 + 1) / 4)
+    assert rep["n_steps"] == 3
+    assert rep["tp_0"] == 1 and rep["fn_0"] == 1 and rep["fp_2"] == 1
+    assert set(rep) == {"macro_f1", "n_steps"} | {f"{key}_{k}" for key in ("f1", "tp", "fp", "fn") for k in range(4)}
+    assert selector_report([np.array([5])], [np.array([-100])], 3)["macro_f1"] == 0
     with pytest.raises(ValueError):
-        selector_report(pred, label, 2, switch_grid=[(0.5, 1)])
+        selector_report([np.array([3])], [np.array([0])], 3)
 
 
 def test_controller_streams_like_offline_replay(tmp_path):
     torch.manual_seed(1)
-    cfg = MARSConfig(modality_dims=[4, 4, 4, 4], q_dim=3, d_model=16, ssm_layers=1, window=4, dropout=0.0,
+    cfg = MARSConfig(q_dim=3, d_model=16, ssm_layers=1, window=4, dropout=0.0,
                      switch_tau=0.4, switch_k=2)
     model = build_router("mars", 16, 3, cfg, text_dim=8)
     model.set_text_embeddings(torch.randn(3, 8))
@@ -94,3 +82,30 @@ def test_controller_streams_like_offline_replay(tmp_path):
             assert switched == (t > 0 and owners[t] != owners[t - 1] or t == 0 and owners[0] != 0)
     with pytest.raises(ValueError, match="proprioception"):
         ctrl.query(z[0])
+
+
+def test_training_selects_masked_all_candidate_macro_f1(monkeypatch):
+    import mars.train as training
+    cfg = MARSConfig(type="mlp", use_q=False, d_model=8, dropout=0, epochs=2, batch_episodes=1)
+    model = build_router("mlp", 4, 3, cfg)
+    seqs = [(np.ones((3, 4), dtype=np.float32), np.array([0, 1, -100]))]
+    predictions = iter([[np.array([0, 1, 99])], [np.array([0, 0, 1])]])
+    monkeypatch.setattr(training, "predict", lambda *args, **kwargs: next(predictions))
+    snapshots = []
+    def record(entry):
+        snapshots.append({k: v.clone() for k, v in model.state_dict().items()})
+    result = train_router(model, seqs, seqs, cfg, log=record)
+    assert result["best_epoch"] == 1
+    assert result["history"][0]["val_macro_f1"] == pytest.approx(2 / 3)
+    assert result["history"][0]["val_n_steps"] == 2
+    for key, value in model.state_dict().items():
+        torch.testing.assert_close(value, snapshots[0][key])
+
+
+def test_training_all_ignored_batch_is_finite():
+    cfg = MARSConfig(type="mlp", use_q=False, d_model=8, epochs=1)
+    model = build_router("mlp", 4, 3, cfg)
+    seqs = [(np.ones((3, 4), dtype=np.float32), np.full(3, -100))]
+    result = train_router(model, seqs, seqs, cfg, log=lambda _: None)
+    assert result["history"][0]["train_loss"] == 0
+    assert result["history"][0]["val_macro_f1"] == 0

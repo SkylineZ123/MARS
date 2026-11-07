@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from ..router import pack_modalities
 
 
 @dataclass
@@ -52,9 +51,7 @@ class RoutedRLTPolicy:
             raise ValueError("normalized proprioception q must be a vector")
         switched = False
         if self.t % self.query_interval == 0:
-            packed = (pack_modalities(features, z.to(features.hidden.device))[0]
-                      if getattr(self.controller.router, "needs_modalities", False) else z[0]).cpu().numpy()
-            _, switched, self.probabilities = self.controller.query(packed, q)
+            _, switched, self.probabilities = self.controller.query(z[0].cpu().numpy(), q)
             if switched:
                 self.queue.clear()
         if not self.queue:

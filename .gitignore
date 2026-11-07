@@ -8,5 +8,16 @@ dist/
 # trained routers, text caches and experiment outputs
 *.pt
 *.pth
+*.safetensors
+*.npz
 *.h5
 outputs/
+
+# Local environments, downloaded assets, and editor state
+.idea/
+.venv*/
+.env
+/assets/
+.cache/
+.mypy_cache/
+.ruff_cache/

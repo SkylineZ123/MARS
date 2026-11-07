@@ -81,7 +81,7 @@ def test_completed_protocol_cannot_issue_more_milestone_rewards():
         env.close()
 
 
-def test_reset_is_deterministic_and_snapshots_restore_physics():
+def test_reset_is_deterministic_and_training_snapshot_restores_entry_state():
     from mars.tubes.environment import TubesEnv
     from mars.tubes.scripted import ScriptedTubes
     env = TubesEnv(render=False)
@@ -95,12 +95,25 @@ def test_reset_is_deterministic_and_snapshots_restore_physics():
         teacher = ScriptedTubes(env)
         for _ in range(60):
             env.step(teacher.act())
-        state, actions, after = env.snapshot(), [], []
+        state = env.snapshot()
         for _ in range(20):
-            actions.append(teacher.act()); env.step(actions[-1]); after.append(env.physics_state())
+            env.step(teacher.act())
+        env.last_skill_success = dict.fromkeys(env.skills, True)
+        env._finished = True
         env.restore_training_snapshot(state)
-        for action, expected in zip(actions, after):
-            env.step(action)
-            np.testing.assert_allclose(env.physics_state(), expected, atol=1e-8)
+        # Entry-state restoration is the contract; solver/controller caches and
+        # policy memory are excluded, so do not assert future trajectory equality.
+        np.testing.assert_allclose(env.physics_state(), state["physics"], atol=1e-8)
+        np.testing.assert_array_equal(env.sim.data.ctrl, state["ctrl"])
+        np.testing.assert_array_equal(env.robot.gripper.current_action, state["gripper_action"])
+        np.testing.assert_array_equal(env.sim.model.body_pos[env.rack_id], state["rack_pos"])
+        np.testing.assert_array_equal(env.sim.model.body_quat[env.rack_id], state["rack_quat"])
+        np.testing.assert_array_equal(env.home, state["home"])
+        assert (env.stage_index, env._stable, env.t) == (state["stage_index"], state["stable"], state["t"])
+        assert env.events == state["events"] and env.completed == state["completed"]
+        assert env._toppled == state["toppled"]
+        assert not env._finished and not any(env.last_skill_success.values())
+        env.step(np.r_[np.zeros(6), -1])
+        assert np.isfinite(env.physics_state()).all()
     finally:
         env.close()

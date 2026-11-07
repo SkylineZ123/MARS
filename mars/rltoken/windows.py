@@ -1,8 +1,9 @@
 """Chunk-level replay windows from an episode log (paper Sec. III-B b).
 
 A skill interval is a maximal run of steps held by specialist k (its own actions or
-expert corrections on its behalf), truncated at the first skill success. Every step
-t of an interval starts a window of L = min(C, e - t) executed actions, so windows
+expert corrections on its behalf), truncated at the first skill success. Starts
+t = s, s + stride, ... within each interval [s, e) produce windows of
+L = min(C, e - t) executed actions, so windows
 overlap and never cross an ownership change.
   reward  r_{t+j} = 1 iff the skill succeeds right after action t+j (skill="task": the task)
   done    d = 1 iff the window reaches the interval end and the interval ended by
@@ -15,13 +16,18 @@ overlap and never cross an ownership change.
           backbone's chunk cadence) or a shifted slice of one chunk; rows executed by
           the expert are replaced by the demonstrated action
 
-Window construction follows build_transition / build_stride2_transitions in
-scripts/train_rlt_stage2_pi05.py @cccf949.
+Adapted from build_transition / build_stride2_transitions in
+scripts/train_rlt_stage2_pi05.py @cccf949. The default stride 1 preserves legacy
+sampling. configs/rltoken_paper.yaml explicitly selects C=5 and stride 2;
+configs/rltoken.yaml retains C=10 and stride 1. The replay stride does not change
+control/action cadence or the C stored in pretrained checkpoints. A preset alone
+does not establish full paper reproduction or pretrained training provenance.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Integral
 
 import numpy as np
 
@@ -104,7 +110,10 @@ def build_windows(
     pad_mode: str = "ref",
     skill_owner: np.ndarray | None = None,
     handoff_gamma: float | None = None,
+    stride: int = 1,
 ) -> tuple[dict[str, np.ndarray], dict]:
+    if isinstance(stride, bool) or not isinstance(stride, Integral) or stride <= 0:
+        raise ValueError("stride must be a positive integer")
     if C <= 0 or k <= 0:
         raise ValueError("C and specialist controller index k must be positive")
     if alignment not in ("executed", "shifted_slice") or pad_mode not in ("ref", "zero"):
@@ -131,7 +140,7 @@ def build_windows(
                              ("z", "q", "ref", "act", "rew", "valid", "done", "next_z", "next_q",
                               "next_ref", "source", "step", "L")}
     for itv in intervals:
-        for t in range(itv.start, itv.end):
+        for t in range(itv.start, itv.end, stride):
             L = min(C, itv.end - t)
             nxt = t + L
             done = float(nxt == itv.end and itv.reason in ("success", "handoff"))

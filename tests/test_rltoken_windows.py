@@ -183,3 +183,45 @@ def test_same_controller_cannot_borrow_next_objects_success():
     assert w["L"].tolist() == [3, 2, 1, 3, 2, 1]
     assert not w["rew"][:3].any()
     assert w["rew"][3:].sum() == 3
+
+
+def test_stride_two_subsamples_starts_per_interval_without_changing_windows():
+    # Odd starts and separated intervals distinguish per-interval from global stride.
+    log = make_log([0, 1, 1, 1, 1, 1, 0, 1, 1], vla_t=(0, 3, 6))
+    dense, _ = build_windows(log, 1, "place", 5)
+    sparse, stats = build_windows(log, 1, "place", 5, stride=2)
+    assert dense["step"].tolist() == [1, 2, 3, 4, 5, 7, 8]
+    assert sparse["step"].tolist() == [1, 3, 5, 7]
+    assert stats["windows"] == 4
+    picks = [0, 2, 4, 5]
+    for key in dense:
+        np.testing.assert_array_equal(sparse[key], dense[key][picks])
+    default, _ = build_windows(log, 1, "place", 5, stride=1)
+    for key in dense:
+        np.testing.assert_array_equal(default[key], dense[key])
+
+
+def test_stride_validation_in_api_and_config():
+    import pytest
+    from mars.rltoken.config import SpecialistConfig
+    log = make_log([1] * 4, vla_t=(0,))
+    for bad in (0, -1, 1.5, 2.0, True, False, "2", None):
+        with pytest.raises(ValueError, match="stride must be a positive integer"):
+            build_windows(log, 1, "place", 5, stride=bad)
+        with pytest.raises(ValueError, match="window_stride must be a positive integer"):
+            SpecialistConfig(window_stride=bad)
+
+
+def test_paper_preset_changes_only_chunk_length_and_window_stride():
+    from pathlib import Path
+    from dataclasses import asdict
+    import yaml
+    from mars.rltoken.config import SpecialistConfig, load_config
+    root = Path(__file__).parents[1] / "configs"
+    legacy = load_config(root / "rltoken.yaml", "specialist", SpecialistConfig)
+    paper = load_config(root / "rltoken_paper.yaml", "specialist", SpecialistConfig)
+    assert (legacy.C, legacy.window_stride) == (10, 1)
+    assert (paper.C, paper.window_stride) == (5, 2)
+    assert asdict(paper) == {**asdict(legacy), "C": 5, "window_stride": 2}
+    old, new = [yaml.safe_load((root / name).read_text()) for name in ("rltoken.yaml", "rltoken_paper.yaml")]
+    assert old["adapter"] == new["adapter"] and old["adapter_train"] == new["adapter_train"]

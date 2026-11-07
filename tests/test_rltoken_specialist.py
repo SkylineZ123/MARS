@@ -146,3 +146,34 @@ def test_replay_ring_and_persistence(tmp_path):
     buf.save(tmp_path / "r.npz")
     again = ReplayBuffer.load(tmp_path / "r.npz")
     assert len(again) == 5
+
+
+def test_legacy_checkpoint_defaults_to_stride_one_and_resumes(tmp_path):
+    from mars.rltoken.learner import save_specialist, load_specialist
+    cfg = SpecialistConfig(C=C, actor_hidden=[8], critic_hidden=[8])
+    learner = SpecialistLearner(Z, Q, A, cfg)
+    path = tmp_path / "legacy.pt"
+    save_specialist(path, learner)
+    payload = torch.load(path, weights_only=False)
+    del payload["config"]["window_stride"]  # released configs predate this field
+    torch.save(payload, path)
+    inference = load_specialist(path)
+    resumed = load_specialist(path, cfg, resume=True)
+    assert inference.C == C and inference.cfg.window_stride == resumed.cfg.window_stride == 1
+    for key, value in learner.actor.state_dict().items():
+        torch.testing.assert_close(inference.actor.state_dict()[key], value)
+        torch.testing.assert_close(resumed.actor.state_dict()[key], value)
+    with pytest.raises(ValueError, match="resume config"):
+        load_specialist(path, replace(cfg, window_stride=2), resume=True)
+
+
+def test_paper_stride_survives_checkpoint_save_and_resume(tmp_path):
+    from mars.rltoken.learner import save_specialist, load_specialist
+    cfg = SpecialistConfig(C=5, window_stride=2, actor_hidden=[8], critic_hidden=[8])
+    learner = SpecialistLearner(Z, Q, A, cfg)
+    path = tmp_path / "paper.pt"
+    save_specialist(path, learner)
+    assert load_specialist(path).cfg.window_stride == 2
+    assert load_specialist(path, cfg, resume=True).cfg.window_stride == 2
+    with pytest.raises(ValueError, match="resume config"):
+        load_specialist(path, replace(cfg, window_stride=1), resume=True)
