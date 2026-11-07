@@ -5,23 +5,20 @@
 
 ## 配置与命令
 
-`configs/rltoken.yaml` 是通用组件配置；
+`configs/rltoken.yaml` 是通用组件配置。相关的运行命令如下：
 ```bash
-python -m mars.rltoken --help
+python -m mars.rltoken --help # 查看可用命令与参数
 python -m mars.rltoken train-adapter --data tokens.npz \
-  --config configs/rltoken.yaml --output outputs/adapter --device cuda
+  --config configs/rltoken.yaml --output outputs/adapter --device cuda #使用离线 Token 数据训练共享适配器
 python -m mars.rltoken build-windows --episode episode.pt \
-  --controller-id 1 --skill pickup --config configs/rltoken_paper.yaml \
-  --output outputs/pickup_windows.npz
+  --controller-id 1 --skill pickup --config configs/rltoken_paper.yaml \ 
+  --output outputs/pickup_windows.npz #从轨迹中提取 pickup 技能的训练窗口
 python -m mars.rltoken train-specialist --data outputs/pickup_windows.npz \
-  --config configs/rltoken_paper.yaml --output outputs/pickup.pt \
-  --updates 5000 --device cuda
-```
-
-```bash
+  --config configs/rltoken.yaml --output outputs/pickup.pt \
+  --updates 5000 --device cuda  #训练对应的技能专家
 python -m mars.rltoken train-specialist --resume outputs/pickup.pt \
-  --config configs/rltoken_paper.yaml --output outputs/pickup.pt \
-  --updates 1000 --device cuda
+  --config configs/rltoken.yaml --output outputs/pickup.pt \
+  --updates 1000 --device cuda  #从已有检查点恢复训练
 ```
 
 ## 适配器缓存
