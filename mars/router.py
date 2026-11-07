@@ -54,14 +54,14 @@ def pack_modalities(features, z: Tensor) -> Tensor:
 
 
 class RecurrentRouter(nn.Module):
-    """Per-step recurrent trunk (Mamba or GRU) with a linear head or a candidate-skill query head."""
+    """Causal Mamba, GRU or LSTM trunk with a linear or candidate-skill query head."""
 
     def __init__(self, z_dim: int, num_classes: int, trunk: str = "mamba", skill_query: bool = False,
                  q_dim: int = 8, d_model: int = 128, layers: int = 2, d_state: int = 16, window: int = 8,
                  stride: int = 1, heads: int = 4, query_layers: int = 1, ff_mult: int = 4, dropout: float = 0.1,
                  text_dim: int = 0):
         super().__init__()
-        if trunk not in ("mamba", "gru"):
+        if trunk not in ("mamba", "gru", "lstm"):
             raise ValueError(f"unknown trunk {trunk!r}")
         check_text_queries(skill_query, text_dim)
         self.ctor = dict(z_dim=z_dim, num_classes=num_classes, trunk=trunk, skill_query=skill_query, q_dim=q_dim,
@@ -71,13 +71,16 @@ class RecurrentRouter(nn.Module):
         self.trunk, self.skill_query = trunk, skill_query
         self.window, self.stride = window, stride
         self.kind = {("mamba", False): "mamba_head", ("mamba", True): "mamba_query", ("gru", True): "gru_query",
-                     ("gru", False): "gru_trunk"}[(trunk, skill_query)]
+                     ("gru", False): "gru_trunk", ("lstm", True): "lstm_query",
+                     ("lstm", False): "lstm_head"}[(trunk, skill_query)]
         d = d_model
         self.z_in = nn.Sequential(nn.Linear(z_dim, d), nn.LayerNorm(d))
         self.q_in = nn.Sequential(nn.Linear(q_dim, d), nn.GELU(), nn.Linear(d, d), nn.LayerNorm(d)) if q_dim else None
         self.drop = nn.Dropout(dropout)
         if trunk == "mamba":
             self.blocks = nn.ModuleList([MambaBlock(d, d_state) for _ in range(layers)])
+        elif trunk == "lstm":
+            self.lstm = nn.LSTM(d, d, num_layers=layers, batch_first=True, dropout=0.)
         else:
             self.gru = nn.GRU(d, d, num_layers=layers, batch_first=True)
         self.out_norm = nn.LayerNorm(d)
@@ -124,6 +127,8 @@ class RecurrentRouter(nn.Module):
         if self.trunk == "mamba":
             for block in self.blocks:
                 x = block(x)
+        elif self.trunk == "lstm":
+            x, _ = self.lstm(x)
         else:
             x, _ = self.gru(x)
         h = self.out_norm(x)  # (B, T, d)
@@ -145,6 +150,10 @@ class RecurrentRouter(nn.Module):
         state = {"hist": deque(maxlen=(self.window - 1) * self.stride + 1)}
         if self.trunk == "mamba":
             state["caches"] = [b.init_cache(device) for b in self.blocks]
+        elif self.trunk == "lstm":
+            shape = (self.lstm.num_layers, 1, self.lstm.hidden_size)
+            state["h"] = self.lstm.weight_ih_l0.new_zeros(shape, device=device)
+            state["c"] = self.lstm.weight_ih_l0.new_zeros(shape, device=device)
         else:
             state["h"] = torch.zeros(self.gru.num_layers, 1, self.gru.hidden_size, device=device)
         return state
@@ -156,6 +165,9 @@ class RecurrentRouter(nn.Module):
         if self.trunk == "mamba":
             for block, cache in zip(self.blocks, state["caches"], strict=True):
                 x = block.step(x, cache)
+        elif self.trunk == "lstm":
+            out, (state["h"], state["c"]) = self.lstm(x.reshape(1, 1, -1), (state["h"], state["c"]))
+            x = out[0, 0]
         else:
             out, state["h"] = self.gru(x.reshape(1, 1, -1), state["h"])
             x = out[0, 0]
@@ -195,7 +207,7 @@ class MultimodalFusionRouter(RecurrentRouter):
                          d_model=d_model, layers=layers, d_state=d_state, window=window,
                          heads=heads, dropout=dropout, trunk=trunk, fusion=fusion, skill_query=skill_query,
                          text_dim=text_dim)
-        self.kind = "mars" if trunk == "mamba" else "mars_gru"
+        self.kind = {"mamba": "mars", "gru": "mars_gru", "lstm": "mars_lstm"}[trunk]
         self.needs_modalities = True
         self.modality_dims, self.fusion = dims, fusion
         del self.z_in
@@ -242,7 +254,7 @@ class MARSRouter(RecurrentRouter):
                          q_dim=q_dim, d_model=d_model, layers=layers, d_state=d_state,
                          window=window, heads=heads, dropout=dropout, text_dim=text_dim,
                          query_layers=query_layers, ff_mult=ff_mult)
-        self.kind = "mars" if trunk == "mamba" else "mars_gru"
+        self.kind = {"mamba": "mars", "gru": "mars_gru", "lstm": "mars_lstm"}[trunk]
         self.ctor.pop("stride")
 
 

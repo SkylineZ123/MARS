@@ -28,3 +28,6 @@ include = ["mars*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.setuptools.package-data]
+"mars.tubes" = ["assets/*.stl", "assets/README.md"]

@@ -21,7 +21,7 @@ SECTIONS = ("router", "text", "train", "switch")
 
 @dataclass
 class MARSConfig:
-    # ---- router (mars | mars_gru; ablations: mamba_head | mamba_query | gru_query | gru |
+    # ---- router (mars | mars_gru | mars_lstm; ablations: mamba_head | mamba_query | gru_query | gru |
     #      windowed_query | windowed_tf | windowed_xattn)
     z_dim: int = 960  # shared RL Token, paper input
     type: str = "mars"

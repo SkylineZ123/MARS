@@ -45,8 +45,10 @@ RL 专家只负责"抓取试管"（π1）和"插入试管架"（π2）。接近�
 | # | 阶段 | 判据 | 负责者 / 标签 kind |
 |---|---|---|---|
 | 1/3/5 | `grasp_k` | 双指夹住第 k 支试管（从左数），且管底高出源架顶板 ≥ 1.5 cm | π1 抓取 / `pickup` |
-| 2/4/6 | `insert_k` | 管底低于目标架第 k 孔口 ≥ 4.5 cm；与孔中心偏差 ≤ clearance/2 + 2 mm；倾角 ≤ 15°；未被夹持；夹爪开度 ≥ 6.4 cm | π2 插入 / `insert` |
+| 2/4/6 | `insert_k` | 管底低于目标架第 k 孔口 ≥ 4.5 cm；管体中心与孔中心的水平偏差 ≤ 孔内半宽 + 2 mm（默认 11 mm）；倾角 ≤ 15°；未被夹持；夹爪开度 ≥ 6.4 cm | π2 插入 / `insert` |
 | 7 | `home` | 末端距起始位姿 < 4 cm，且 3 支试管都在位 | VLA |
+
+上表按 `TubesEnv.seated` 的实际实现记录。几何成功判据的中心距离阈值与孔、管间的物理间隙是两个量；接触约束仍由 MuJoCo 执行。此前文档把该阈值写成 `clearance/2 + 2 mm`，与实现不符，此处仅修正文档。
 
 **失败**：任意试管掉到桌下，或某支未被夹持的试管倾角 > 60° 且持续 40 步。超过 `max_steps = 1200` 步截断。
 指令为："Move the three test tubes from the orange rack to the green rack one by one from left to right, inserting each into the matching hole, then return to the start position."（36 个 token，低于 smolvla_libero 的 48 上限）

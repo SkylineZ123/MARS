@@ -120,6 +120,7 @@ python -m mars.rltoken --help              # adapter 训练、窗口构造、专
 |---|---|
 | `mars` | MARS：RL Token 与本体状态 + Mamba 记忆 + 候选技能文本查询 |
 | `mars_gru` | 同上，记忆主干换为 GRU |
+| `mars_lstm` | 同上，记忆主干换为两层单向 LSTM |
 | `mars` + `skill_query: false` | 用直接线性分类头代替候选查询（消融） |
 | `mamba_head`、`mamba_query`、`gru_query` | 在打包向量上直接使用循环主干，不做模态融合 |
 | `gru` | GRU 循环路由器（对照） |

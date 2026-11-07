@@ -54,8 +54,15 @@ class SpecialistLearner:
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=cfg.lr_critic)
         self.n_updates = 0
 
-    def update(self, batch: dict[str, torch.Tensor]) -> dict:
-        """One learner update; n (schedule clock) is the number of updates done so far."""
+    def update(self, batch: dict[str, torch.Tensor], *, schedule_step: float | None = None) -> dict:
+        """One TD3 update; optionally clock loss weights by collection progress.
+
+        The default is the historical update clock. An explicit clock changes only
+        the actor loss weights; policy delay and the saved counter still count
+        actual optimizer updates (including in reduced-update replay controls).
+        """
+        if schedule_step is not None and (not np.isfinite(schedule_step) or schedule_step < 0):
+            raise ValueError("schedule_step must be finite and nonnegative")
         cfg = self.cfg
         batch = {k: batch[k].to(device=self.device, dtype=torch.float32) for k in TRAIN_KEYS}
         B = batch["z"].shape[0]
@@ -84,7 +91,8 @@ class SpecialistLearner:
 
         if n % cfg.policy_delay == 0:
             with frozen(self.critic):
-                loss_a, info_a = actor_loss(batch, self.actor, self.critic, n, cfg)
+                loss_a, info_a = actor_loss(batch, self.actor, self.critic,
+                                           n if schedule_step is None else schedule_step, cfg)
             self.actor_opt.zero_grad(set_to_none=True)
             loss_a.backward()
             self.actor_opt.step()

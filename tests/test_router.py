@@ -22,7 +22,7 @@ def make_model(kind="mars", **overrides):
     return model, cfg
 
 
-@pytest.mark.parametrize("kind", ["mars", "mars_gru", "mamba_query", "gru_query", "windowed_query", "single_frame"])
+@pytest.mark.parametrize("kind", ["mars", "mars_gru", "mars_lstm", "mamba_query", "gru_query", "windowed_query", "single_frame"])
 def test_text_queries_causal_step_and_roundtrip(kind, tmp_path):
     torch.manual_seed(3)
     model, cfg = make_model(kind)
@@ -64,8 +64,9 @@ def test_mars_variants_step_matches_sequence(overrides):
         torch.testing.assert_close(p, probs[t], atol=1e-6, rtol=1e-5)
 
 
-def test_candidate_permutation_and_identical_descriptions():
-    model, _ = make_model()
+@pytest.mark.parametrize("kind", ["mars", "mars_lstm"])
+def test_candidate_permutation_and_identical_descriptions(kind):
+    model, _ = make_model(kind)
     model.eval()
     z, q = torch.randn(1, 7, 16), torch.randn(1, 7, 3)
     with torch.no_grad():

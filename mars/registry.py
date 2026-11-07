@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-MARS_KINDS = ("mars", "mars_gru")
+MARS_KINDS = ("mars", "mars_gru", "mars_lstm")
 FUSION_KINDS = ("multimodal_mars", "multimodal_mars_gru")
 RECURRENT_KINDS = ("mamba_head", "mamba_query", "gru_query")  # RecurrentRouter without modality fusion
 WINDOWED_KINDS = ("windowed_tf", "windowed_xattn", "windowed_query")
@@ -23,7 +23,7 @@ def build_router(kind: str, z_dim: int, num_classes: int, cfg, text_dim: int = 0
 
         return MARSRouter(z_dim, num_classes, q_dim=q_dim, d_model=cfg.d_model,
                           layers=cfg.ssm_layers, d_state=cfg.d_state, window=cfg.window, heads=cfg.heads,
-                          dropout=cfg.dropout, trunk="mamba" if kind == "mars" else "gru",
+                          dropout=cfg.dropout, trunk={"mars": "mamba", "mars_gru": "gru", "mars_lstm": "lstm"}[kind],
                           query_layers=cfg.query_layers, ff_mult=cfg.ff_mult,
                           skill_query=cfg.skill_query, text_dim=text_dim if cfg.skill_query else 0)
     if kind == "single_frame":

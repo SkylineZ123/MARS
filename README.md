@@ -174,6 +174,7 @@ They are kept only for legacy checkpoints; `fusion` and `modality_dims` in the c
 |---|---|
 | `mars` | MARS: RL Token + proprioception + Mamba memory + candidate-skill text queries |
 | `mars_gru` | the same, with a GRU memory trunk |
+| `mars_lstm` | the same, with a two-layer unidirectional LSTM memory trunk |
 | `mars` + `skill_query: false` | direct linear classifier instead of candidate queries (ablation) |
 | `single_frame` | same embedding and text queries, no memory trunk: the current step only (ablation) |
 | `mamba_head`, `mamba_query`, `gru_query` | recurrent trunk on the same RL Token + proprioception embedding; `mamba_head` has a linear head, the query kinds read a memory window spaced by `window_stride` |
