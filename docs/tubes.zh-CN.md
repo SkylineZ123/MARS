@@ -1,7 +1,7 @@
 # 试管搬运仿真
 
 安装和下载权重见[中文 README](../README.zh-CN.md)，训练数据接口见
-[RL Token 指南](rltoken.zh-CN.md)，图形依赖见[环境说明](../environment/SIMULATION.md)。
+[RL Token 指南](rltoken.zh-CN.md)。
 
 ## 运行入口
 
